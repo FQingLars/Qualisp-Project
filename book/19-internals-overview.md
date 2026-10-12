@@ -1,6 +1,6 @@
 # Глава 19. Устройство компилятора
 
-Краткая экскурсия во внутренности QLISP v2.8.3 (серия v2.4–v2.8: удаление легаси-AOT, JIT copy-and-patch, образы, единый HLO-стенсил-эмиттер, модуль Tablet, HibLin OOM-фиксы, эвикция пулов, контракты времени жизни, TCO, кэш раскрытия макросов, DEBUG-TRACE и подсчёт ссылок на стабильные ячейки). Полное описание — в `ARCHITECTURE.md` дерева разработки.
+Краткая экскурсия во внутренности Qualisp v2.8.5 (серия v2.4–v2.8: удаление легаси-AOT, JIT copy-and-patch, образы, единый HLO-стенсил-эмиттер, модуль Tablet, HibLin OOM-фиксы, эвикция пулов, контракты времени жизни, TCO, кэш раскрытия макросов, DEBUG-TRACE, подсчёт ссылок на стабильные ячейки, LSan-гейт утечек и rebrand QLISP → Qualisp). Полное описание — в `ARCHITECTURE.md` дерева разработки.
 
 ## 19.1 Пайплайн
 
@@ -167,13 +167,15 @@ class GradientTape {  // thread_local singleton
 
 8. **HLOPROG переживает promote (2.3.1, #29).** `clone_to` клонирует обёртку и делит compiled fn (живёт в кэше компилятора всё время процесса) — `defvar prog (HLO-COMPILE ...)` безопасен после сброса scratch.
 
-9. **Владение стабильными ячейками (v2.7.7–v2.8.3).** Компилированная программа владеет своими артефактами (sealed-константы в storage-скопе, клон графа, W^X-страница) и умирает на границе формы, если не привязана к имени; привязка (`defvar`/`setq` через promote) делает её бессмертной, а перепись имени по лесному правилу (v2.8.0) выпускает старое поддерево. Кэш стенсила — non-owning: drop стирает запись перед освобождением, поэтому мёртвая программа не возвращается из кэша. Аудитор `QLISP_AUDIT=1` ловил «второе бессмертие» и сирот якорного реестра на границе формы; **с 2.8.3 якоря-владельцы и аудитор удалены**: стабильная ячейка несёт `refs_`, каждое место разделения берёт `stable_ref`, смерть последнего владельца — итеративный worklist-каскад `stable_release` (строки → malloc, программы → page_free + delete, тензоры → release_tracked). CI-шаг `leak_watch` заменён на ASan-sweep с `detect_leaks=0`, флаг `QLISP_RC_POISON=1` заполняет освобождённые ячейки и валит use-after-release/double-release. Замена стабильного значения посреди формы не каскадит сразу: корень паркуется (`defer_stable_release`, метка эпохи) и умирает на следующем restore скраша или на границе формы (`flush_form_end`) — иначе под live-глобалами каскад убивал тело исполняемой функции. Глобальный кадр замыканиями больше не захватывается: глобалы резолвятся live при вызове, захватываются только локальные кадры. Подробно — гл. 5.5.
+9. **Владение стабильными ячейками (v2.7.7–v2.8.3).** Компилированная программа владеет своими артефактами (sealed-константы в storage-скопе, клон графа, W^X-страница) и умирает на границе формы, если не привязана к имени; привязка (`defvar`/`setq` через promote) делает её бессмертной, а перепись имени по лесному правилу (v2.8.0) выпускает старое поддерево. Кэш стенсила — non-owning: drop стирает запись перед освобождением, поэтому мёртвая программа не возвращается из кэша. Аудитор `QLISP_AUDIT=1` ловил «второе бессмертие» и сирот якорного реестра на границе формы; **с 2.8.3 якоря-владельцы и аудитор удалены**: стабильная ячейка несёт `refs_`, каждое место разделения берёт `stable_ref`, смерть последнего владельца — итеративный worklist-каскад `stable_release` (строки → malloc, программы → page_free + delete, тензоры → release_tracked). CI-шаг `leak_watch` заменён на ASan-sweep, а с 2.8.4 — на LSan-гейт с `detect_leaks=1` (см. 19.13), флаг `QUALISP_RC_POISON=1` заполняет освобождённые ячейки и валит use-after-release/double-release. Замена стабильного значения посреди формы не каскадит сразу: корень паркуется (`defer_stable_release`, метка эпохи) и умирает на следующем restore скраша или на границе формы (`flush_form_end`) — иначе под live-глобалами каскад убивал тело исполняемой функции. Глобальный кадр замыканиями больше не захватывается: глобалы резолвятся live при вызове, захватываются только локальные кадры. Подробно — гл. 5.5.
 
 10. **Tail-call optimization для self-хвостовых вызовов (v2.8.2).** Хвостовой вызов пере-биндит кадр (параметры копируются в heap-стор, итерация освобождается через `restore`) вместо роста стека. Гейт: при живых tape-узлах TCO для итерации выключается; `let`/`let*` разворачиваются в транполине до 8 уровней, глубже — обычный кадр. Замер: рекурсивные train-эпохи N=100/300/500 — было 34.8/51.2/67.5 МБ против плоского `while` ~25 МБ, стало 27.4 МБ плато.
 
 11. **Кэш раскрытия макросов (v2.8.2).** `MacroExpander` кэширует раскрытие на форму-источник (хит по контенту; запись держит root-клон источника), инвалидация на `defmacro*`/`SLOT-SET`; `macrolet`-протяжения — вне кэша. Это закрыло класс-A утечки scratch: `let*` в цикле на 200k итераций 217 МБ → 22.7 МБ (дифференциал к `let` схлопнулся).
 
-12. **DEBUG-TRACE (v2.8.2).** Кольцевой буфер на 4096 записей (`src/core/trace.{hpp,cpp}`) с категориями `scope/clone/anchor/expand/macro`; примитивы `DEBUG-TRACE`, `TRACE-STATS`, `TRACE-DUMP`, `TRACE-CLEAR`, env `QLISP_TRACE`. Выключенный трейс стоит один relaxed load, сам буфер не течёт. Точки эмиссии: `reset_scratch` (границы форм), `clone_to` (мост disposable→stable), take/release якорей, кэш раскрытия, `defmacro`/`defcompiler-macro`.
+12. **DEBUG-TRACE (v2.8.2).** Кольцевой буфер на 4096 записей (`src/core/trace.{hpp,cpp}`) с категориями `scope/clone/anchor/expand/macro`; примитивы `DEBUG-TRACE`, `TRACE-STATS`, `TRACE-DUMP`, `TRACE-CLEAR`, env `QUALISP_TRACE`. Выключенный трейс стоит один relaxed load, сам буфер не течёт. Точки эмиссии: `reset_scratch` (границы форм), `clone_to` (мост disposable→stable), take/release якорей, кэш раскрытия, `defmacro`/`defcompiler-macro`.
+
+13. **Предупреждение о непрочитанных градиентах (v2.8.5).** `GRAD!` регистрирует параметры с посчитанным градиентом в `grad_pending_`; `GRAD-OF` и `SGD-STEP` снимают параметр с учёта. На границе формы (`flush_form_end`) остаток множества — параметры, чьи градиенты никто не прочитал, — печатает предупреждение на stderr и очищается: градиент аллоцирован в scratch-арене формы и уже мёртв, поэтому значение после границы честно нулевое (гл. 7.8).
 
 ## 19.9 HLO-пайплайн
 
@@ -205,11 +207,11 @@ class GradientTape {  // thread_local singleton
 - `GuiltDetector::detect(router, labels)` → `GuiltVerdict { kind, guilty_hop, per_sample_hop, per_sample_kind }`.
 - `NS-IF` (`do_ns_if`) выбирает ветвь per-sample по argmax, записывает хоп, исполняет ветвь первого образца (для чистого батча; для смешанного — маршрут/guilt per-sample, но исполнение одно).
 - `NS-GRAD!` (`do_ns_grad`) блокирует tape-узлы виновных ветвей, добавляет softmax-weighted STE в `decision_logits->grad`.
-- С v2.3.4 роутер работает и поверх макро-слотов (`ns-route`/`ns-route-sample`/`ns-route-index`): NS-RL-движок susuwatari (T1–T4) живёт на уровне stdlib + примитивов `SAMPLE`/`EVAL-SANDBOXED` — гл. 14.10.
+- С v2.3.4 роутер работает и поверх макро-слотов (`ns-route`/`ns-route-sample`/`ns-route-index`): NS-RL-движок blackit (T1–T4) живёт на уровне stdlib + примитивов `SAMPLE`/`EVAL-SANDBOXED` — гл. 14.10.
 
 ## 19.11 LSP
 
-`qlisp-lsp` (`src/lsp/server.cpp`, отдельная цель CMake без линковки движка) — с v2.3.8 полноценный Language Server, автономный (JSON-RPC over stdio, встроенный JSON-парсер с честным анескейпингом `\n \t \r \b \f \uXXXX` — старый `json_get` терял `\n`, склеивая документ в одну строку):
+`qualisp-lsp` (`src/lsp/server.cpp`, отдельная цель CMake без линковки движка) — с v2.3.8 полноценный Language Server, автономный (JSON-RPC over stdio, встроенный JSON-парсер с честным анескейпингом `\n \t \r \b \f \uXXXX` — старый `json_get` терял `\n`, склеивая документ в одну строку):
 
 - **Ядро**: двухпроходный сканер S-форм, повторяющий конвенции ридера (строки с экранированием, `;`-комментарии, диспетч-макросы `#' #(` `#\`, quote/quasiquote/comma); инкрементальная синхронизация (`change: 2`) через офсетный сплайсинг — без перечитывания документа.
 - **Диагностики**: незакрытая форма (с позицией открывающей скобки), лишняя `)`, незакрытая строка — точные диапазоны.
@@ -225,8 +227,8 @@ class GradientTape {  // thread_local singleton
 # Native Linux (LLVM не нужен)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 
-# Кросс-компиляция qvalent/qlisp-lsp под Windows из Linux
-# (для qlisp корректный путь — нативная MSYS2-сборка)
+# Кросс-компиляция qvalent/qualisp-lsp под Windows из Linux
+# (для qualisp корректный путь — нативная MSYS2-сборка)
 cmake -B build-windows \
   -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-w64-mingw32.cmake \
   -DCMAKE_BUILD_TYPE=Release
@@ -234,13 +236,13 @@ cmake -B build-windows \
 
 Продукты сборки (из `CMakeLists.txt`):
 
-- `qlisp` — REPL/интерпретатор + встроенный JIT (OpenBLAS, OpenMP; LLVM не нужен).
-- `qlisp-lsp` — LSP-сервер (только `src/lsp/server.cpp`).
+- `qualisp` — REPL/интерпретатор + встроенный JIT (OpenBLAS, OpenMP; LLVM не нужен).
+- `qualisp-lsp` — LSP-сервер (только `src/lsp/server.cpp`).
 - `qvalent` — пакетный менеджер (только `src/qvalent/main.cpp`).
 
-Отдельного AOT-компилятора (`qlispc`) и библиотек `libqlisp_runtime.a`/`libqlisp_tensor_runtime.a` больше нет — всё нативное строится на лету из S-выражений (v2.4.0).
+Отдельного AOT-компилятора (`qlispc`, до v2.4.0) и библиотек `libqlisp_runtime.a`/`libqlisp_tensor_runtime.a` больше нет — всё нативное строится на лету из S-выражений (v2.4.0).
 
-Модули stdlib вшиваются в бинарник на этапе сборки (`cmake/stdlib_embed.cmake`, через `cmake/gen_stdlib_header.cmake` — без `xxd` для переносимости на MSYS2/MinGW) — поэтому дистрибутив QLISP — один файл ~2 МБ.
+Модули stdlib вшиваются в бинарник на этапе сборки (`cmake/stdlib_embed.cmake`, через `cmake/gen_stdlib_header.cmake` — без `xxd` для переносимости на MSYS2/MinGW) — поэтому дистрибутив Qualisp — один файл ~2 МБ.
 
 ### Windows-сборка
 
@@ -250,7 +252,7 @@ cmake -B build-windows \
 
 1. **CI** (`.github/workflows/build.yml`, job `windows`): MSYS2 MinGW64 + OpenBLAS нативно под Win64 ABI. Публикация релиза автоматическая при пуше тега (`git tag vX.Y.Z && git push origin main vX.Y.Z`); артефакты CI переиздаются в релизах документационного репозитория.
 2. **MSYS2 локально**: установить `mingw-w64-x86_64-gcc`/`mingw-w64-x86_64-openblas`, затем `cmake -G "MinGW Makefiles" -S . -B build && cmake --build build -j`.
-3. **Кросс-компиляция `qlisp-lsp`/`qvalent` из Linux** через toolchain-файл (см. выше).
+3. **Кросс-компиляция `qualisp-lsp`/`qvalent` из Linux** через toolchain-файл (см. выше).
 
 ## 19.13 Ключевые константы
 
@@ -260,8 +262,9 @@ cmake -B build-windows \
 | ConsCellPool | предвыделенный, 64k ячеек (~1.5 МБ) за блок (v2.7.4; бывшие блоки 1 М ячеек удерживали пик навсегда) |
 | Guard глубины (v2.7.4) | 10 000 eval-кадров; ловимая ошибка + `(EVAL-MAX-DEPTH n)`; RAII-декремент, eval жив после catch |
 | Кольцо DEBUG-TRACE (v2.8.2) | 4096 записей; категории `scope/clone/anchor/expand/macro`; выключено по умолчанию |
-| rc-контракт (v2.8.3) | `refs_` в стабильной ячейке (rc=1 при создании, `nil` бессмертен); `QLISP_RC_POISON=1` — QA-хук против use-after-release; `QLISP_AUDIT` больше не читается |
-| TensorBufferPool | exact-size, лимит 1 ГБ |
+| rc-контракт (v2.8.3) | `refs_` в стабильной ячейке (rc=1 при создании, `nil` бессмертен); `QUALISP_RC_POISON=1` — QA-хук против use-after-release; `QLISP_AUDIT` больше не читается |
+| LSan-гейт (v2.8.4) | CI-шаг `leak_watch`: ASan c `detect_leaks=1` + `ulimit -s unlimited` — корпус ловит утечки, а не только UAF |
+| TensorBufferPool | exact-size, лимит 256 МБ с эвикцией крупнейшей корзины (v2.7.4) |
 | SIMD (AVX2/FMA) | 8×f32 = 256 бит |
 | SIMD (NEON) | 4×f32 = 128 бит |
 | Кэш HLO | in-process fingerprint (версия эмиттера + shape-ключ); дисковый кэш удалён (v2.7.0) |
@@ -271,10 +274,10 @@ cmake -B build-windows \
 | Автодополнения LSP | 150+ |
 | Стенсилы JIT | SysV x86-64 (Win64/ARM64 — в плане) |
 | GCC/Clang (минимум) | GCC 13+ / Clang 16+ (C++20); LLVM не нужен |
-| qvalent локальный каталог | `./qlisp-packages/<name>/` |
-| qvalent кэш | `$HOME/.cache/qlisp/<deployer>/<repo>/` |
+| qvalent локальный каталог | `./qualisp-packages/<name>/` |
+| qvalent кэш | `$HOME/.cache/qualisp/<deployer>/<repo>/` |
 | QSRD v2 magic | `"QSRD"` (u16 ver) |
-| Тесты | сюит зелёный (Release, Linux); ASan чисто на HLO/NS/tape-путях; soak-харнесс без роста RSS; production-чеки RSS v2.7.3–v2.8.1; с 2.8.3 CI гоняет корпус под ASan-свипом с `detect_leaks=0` (85/87 файлов без утечек; остатки — `symbolic_neuro.qlsp` 66 Б и `tablet.qlsp` 67 Б, стабильные) |
+| Тесты | сюит зелёный (Release, Linux); soak-харнесс без роста RSS; production-чеки RSS v2.7.3–v2.8.1 (RSS-пороги спрашивают «под санитайзером?» и меряют только на обычной сборке, ddca239d); с 2.8.3 свип под ASan, с 2.8.4 — LSan-гейт `detect_leaks=1` по всему корпусу: **leak gate зелёный, ни одного утечного файла** (на старте раунда было 55/87) |
 | Tail-call (v2.8.2) | self-хвост пере-биндит кадр; гейт по живым tape-узлам; `let`/`let*` разворачиваются до 8 уровней |
 | Контракт CI (v2.7.1) | `run-tests` считает падения в `*test-failed*`; процесс возвращает 1 при любом упавшем сюите |
 | LSP | инкрементальный sync (change:2), cross-file def/refs/rename, folding, formatting (v2.3.8) |
@@ -294,4 +297,4 @@ cmake -B build-windows \
 
 ---
 
-Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21 (образы), гл. 22 (Tablet). Тесты — 87 сюитов в `tests/` (плюс 9 в `test/`), включая `jit.qlsp`, `image.qlsp`, `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp` (156 проверок), `memory_setq.qlsp`, `loop_lifetime.qlsp`, `memory_pools.qlsp`, `plist_anchor.qlsp`, `production_mem.qlsp`, `expansion_cache.qlsp`, `debug_trace.qlsp`, `tail_call.qlsp`, новые `rc_contract.qlsp` (9 сценариев) и `live_globals.qlsp` (9 проверок), `homoiconic.qlsp`. Контракты времени жизни (v2.7.5–v2.8.3) разобраны отдельно в гл. 5.5.
+Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21 (образы), гл. 22 (Tablet). Тесты — сюиты в `tests/` (плюс фазовые в `test/`), включая `jit.qlsp`, `image.qlsp`, `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp` (156 проверок), `memory_setq.qlsp`, `loop_lifetime.qlsp`, `memory_pools.qlsp`, `plist_anchor.qlsp`, `production_mem.qlsp`, `expansion_cache.qlsp`, `debug_trace.qlsp`, `tail_call.qlsp`, `rc_contract.qlsp` (9 сценариев), `live_globals.qlsp` (9 проверок), `equal.qlsp` (рефлексивность/идентичность), `tref.qlsp` (границы), `print_arity.qlsp`, `homoiconic.qlsp`. Контракты времени жизни (v2.7.5–v2.8.3) и закрытый раунд памяти с LSan-гейтом (v2.8.4–v2.8.5) разобраны отдельно в гл. 5.5.

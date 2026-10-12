@@ -29,7 +29,7 @@
 (run-tests)
 ```
 
-> 🐍 `pytest` в миниатюре: `deftest` ≈ `def test_*`, `run-tests` ≈ запуск pytest, `assert-eq` ≈ `assert a == ==`. Имена тестов склеиваются через `strcat` с префиксом `"test::"`.
+> 🐍 `pytest` в миниатюре: `deftest` ≈ `def test_*`, `run-tests` ≈ запуск pytest, `assert-eq` ≈ `assert a == ==`. Имена тестов склеиваются через `strcat` с префиксом `"test::"`. Сводка прогона печатает счётчик вида `INT/INT passed` — это тоже `strcat` над `type-of`-символами (с v2.8.5 не-строковые аргументы `strcat` печатаются как `WRITE-TO-STRING`, а не молча пропускаются).
 
 Для тензоров есть `assert-zero` — проверка, что тензор почти нулевой (стандартная проверка в тестах градиентов):
 
@@ -100,7 +100,7 @@
 | `#(...)` вектор | `VECTOR` | (нет аналога) |
 | `nil` | `NIL` | `NoneType` |
 
-> 🐍 В Python имена типов в lowercase, в QLISP — uppercase (после `intern`).
+> 🐍 В Python имена типов в lowercase, в Qualisp — uppercase (после `intern`).
 
 ## 15.3 IO — файлы и строки
 
@@ -226,7 +226,7 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 (pkg-install-branch "user/repo" "dev") ;; другая ветка
 ```
 
-Внутри — `http-get` (примитив `prim_http_get`), `pkg-install-branch` идёт через `/tmp/qlisp-pkg-<name>/`, скачивает `pkg.qlsp` манифест и указанные в нём файлы через raw.githubusercontent.com. Подробнее — в главе 16.
+Внутри — `http-get` (примитив `prim_http_get`), `pkg-install-branch` идёт через `/tmp/qualisp-pkg-<name>/`, скачивает `pkg.qlsp` манифест и указанные в нём файлы через raw.githubusercontent.com. Подробнее — в главе 16.
 
 ## 15.10 IMPORT-FROM (v2.3.0+)
 
@@ -263,7 +263,7 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 |---|---|---|
 | `core` | утилиты списков, `let*`, тесты | builtins + pytest |
 | `string` | строки, char-коды | `str` (Python 3.6+) |
-| `ml` | классический ML + потери/softmax (377 строк на самом QLISP) | scikit-learn |
+| `ml` | классический ML + потери/softmax (377 строк на самом Qualisp) | scikit-learn |
 | `dl` | слои-как-данные, `linear`/`net-forward`/`train-step` | `torch.nn` (стиль Sequential) |
 | `io` | файлы, CSV (RFC-4180, v2.7.1) | `open`, `csv` |
 | `regex` | регулярки | `re` |
@@ -275,4 +275,4 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 | `ns` | экспорт нейросимвольного слоя | (нет аналога) |
 | `tablet` | DataFrame-аналог pandas, детерминированный (v2.7.2) | `pandas` |
 
-**Tablet (v2.7.2).** DataFrame-модуль на чистом QLisp поверх примитивов реализован целиком (T0–T9, 156 тестов): типизированные колонки, стабильные сортировки, groupby/merge с детерминированным порядком, `tcsv-read`/`tcsv-write`, JSON rows, окна. Подробности — гл. 22.
+**Tablet (v2.7.2).** DataFrame-модуль на чистом Qualisp поверх примитивов реализован целиком (T0–T9, 156 тестов): типизированные колонки, стабильные сортировки, groupby/merge с детерминированным порядком, `tcsv-read`/`tcsv-write`, JSON rows, окна. Подробности — гл. 22.

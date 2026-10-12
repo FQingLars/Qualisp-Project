@@ -7,7 +7,7 @@
 | `qvalent` (CLI) | Полноценный пакетный менеджер с манифестом `qvalent.toml` | `pip` + `pyproject.toml` |
 | `(pkg-install "user/repo")` | Лёгкая установка из stdlib (через `http-get` примитив) | `curl install.sh` |
 
-## 16.2 qvalent: pip для QLISP
+## 16.2 qvalent: pip для Qualisp
 
 CLI `qvalent` (`src/qvalent/main.cpp`, ~260 строк) — отдельная цель CMake. Команды (из `print_usage()`):
 
@@ -18,7 +18,7 @@ qvalent list                                 # установленные пак
 qvalent info <name>                          # детали пакета
 qvalent update <name>                        # обновить
 qvalent remove <name>                        # удалить
-qvalent search <query>                       # поиск по GitHub (topic:qlisp)
+qvalent search <query>                       # поиск по GitHub (topic:qualisp)
 qvalent help                                 # эта справка
 ```
 
@@ -28,14 +28,14 @@ qvalent help                                 # эта справка
 [package]
 name = "my-package"
 version = "0.1.0"
-description = "A QLISP package"
+description = "A Qualisp package"
 deployer = "your-github-username"
 repo = "repo-name"
 
 [dependencies]
 ```
 
-Реализация: парсер TOML — крошечный встроенный (`parse_qvalent_toml` в `main.cpp:46-70`). Скачивание — через `curl -L` tarball/zip с GitHub API → `$HOME/.cache/qlisp/<deployer>/<repo>/` → распаковка в `qlisp-packages/<name>/`.
+Реализация: парсер TOML — крошечный встроенный (`parse_qvalent_toml` в `main.cpp:46-70`). Скачивание — через `curl -L` tarball/zip с GitHub API → `$HOME/.cache/qualisp/<deployer>/<repo>/` → распаковка в `qualisp-packages/<name>/`.
 
 > 🐍 `qvalent get user/repo` ≈ `pip install git+https://github.com/user/repo`; `qvalent search` ≈ `pip search` (который в pip давно отключили).
 
@@ -45,21 +45,21 @@ repo = "repo-name"
 
 ```lisp
 (import PKG)
-(pkg-install "user/repo")                 ;; → /tmp/qlisp-pkg-<repo>/
+(pkg-install "user/repo")                 ;; → /tmp/qualisp-pkg-<repo>/
 (pkg-install-branch "user/repo" "dev")    ;; другая ветка
 ```
 
 Внутри (`pkg-install-branch`):
 1. `http-get` на `https://raw.githubusercontent.com/<repo>/<branch>/pkg.qlsp`.
 2. Парсинг манифеста (список файлов).
-3. `mkdir -p /tmp/qlisp-pkg-<repo>` + `spit` манифеста.
+3. `mkdir -p /tmp/qualisp-pkg-<repo>` + `spit` манифеста.
 4. Для каждого файла в манифесте: `http-get` + `spit`.
 
 Годится для простых библиотек-однофайловок; для всего остального — `qvalent`.
 
 ## 16.4 FFI: вызов C-библиотек
 
-QLISP умеет загружать разделяемые библиотеки и вызывать C-функции напрямую. Реализация — `src/ffi/ffi.cpp`, примитивы регистрируются через `register_ffi_primitives`.
+Qualisp умеет загружать разделяемые библиотеки и вызывать C-функции напрямую. Реализация — `src/ffi/ffi.cpp`, примитивы регистрируются через `register_ffi_primitives`.
 
 ### Примитивы
 
@@ -103,7 +103,7 @@ QLISP умеет загружать разделяемые библиотеки 
 (ffi-call "strlen" "int" "hello")   ;; → 5
 ```
 
-> 🐍 **Python-аналогия.** `ctypes.CDLL("libm.so.6").sin(0.0)`. QLISP-вариант компактнее, но поддерживает ограниченный набор сигнатур (KISS-принцип, см. `AGENTS.md`). Для сложных случаев — `FFI-IMPORT` через `define-compiler-macro`-подход или ручной C-binding.
+> 🐍 **Python-аналогия.** `ctypes.CDLL("libm.so.6").sin(0.0)`. Qualisp-вариант компактнее, но поддерживает ограниченный набор сигнатур (KISS-принцип, см. `AGENTS.md`). Для сложных случаев — `FFI-IMPORT` через `define-compiler-macro`-подход или ручной C-binding.
 
 ### Кросс-платформенность
 
@@ -116,7 +116,7 @@ QLISP умеет загружать разделяемые библиотеки 
 
 ## 16.5 QSRD v2 — бинарная сериализация (v2.3.0+)
 
-QSRD — собственный бинарный формат QLISP для персистенции данных. Версия 2 (коммит `82969af`) добавила:
+QSRD — собственный бинарный формат Qualisp для персистенции данных. Версия 2 (коммит `82969af`) добавила:
 
 - Блоб типа `2` — S-выражение в бинарной сериализации (cons-ячейки, символы, числа, строки).
 - Блоб типа `3` — типизированный тензор (dtype сохраняется вместе с шейпом и данными).
@@ -140,6 +140,17 @@ QSRD — собственный бинарный формат QLISP для пе�
 
 > 🐍 **Python-аналогия.** `pickle.dump/load` в Python. Главное отличие: QSRD v2 хранит **dtype тензора** нативно (F16/F32/F64/I32/I64/U8) — `pickle` теряет эту информацию (приходится отдельно вызывать `torch.save` + `np.save` или передавать через `protocol=2`/`5`). DL v2-модели (список-структура) сериализуются QSRD как обычные cons-ячейки — без отдельного протокола.
 
+### Тензоры на любой глубине (v2.8.5)
+
+Раньше тензор сериализовался только как **целая запись верхнего уровня** — вложенный не умел вовсе: модель (alist слоёв с весами) не сохранялась, хотя `stdlib/dl.qlsp` обещает «слои — данные, сериализуются напрямую». Теперь тензор — данные **где угодно в структуре**: тег `6` кодируется в любой позиции cons-дерева (dtype + ndim + dims + raw-элементы), круговой рейс сохраняет dtype (включая F16), shape и значения; на любой глубине и рядом со скалярами/символами/строками.
+
+```lisp
+(defvar model (list "layer-1" (ones (list 2 2)) "layer-2" (ones (list 2 1))))
+(qsrd-save "model.qsrd" model)
+(defvar back (qsrd-load "model.qsrd"))
+(tensor-shape (qsrd-get back "layer-1"))   ;; → (2 2) — веса слоя по имени
+```
+
 ### Что хранится в QSRD v2
 
 | Тип | Как кодируется |
@@ -149,7 +160,7 @@ QSRD — собственный бинарный формат QLISP для пе�
 | Число flonum | IEEE 754 double |
 | Строка | u32 length + bytes |
 | Символ | intern-id (lookup в symbol-table) |
-| Тензор | dtype enum (u8) + rank (u8) + shape (rank × i64) + data (raw bytes) |
+| Тензор (верхний уровень и любая вложенность, v2.8.5) | тег `6`: dtype (u8) + ndim (u32) + dims (u32) + data (raw bytes) |
 | NIL | один байт 0x00 |
 | T | один байт 0x01 |
 

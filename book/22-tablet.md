@@ -1,8 +1,8 @@
 # Глава 22. Tablet: DataFrame-аналог pandas (v2.7.2)
 
-С v2.7.2 в stdlib есть **Tablet** — модуль табличных данных в духе pandas: типизированные колонки, NA-дисциплина, стабильные сортировки, groupby, merge, CSV/JSON I/O. ~1300 строк чистого QLisp поверх примитивов — т.е. модуль сам написан на языке (гл. 15), а всё табличное хозяйство доступно из REPL сразу.
+С v2.7.2 в stdlib есть **Tablet** — модуль табличных данных в духе pandas: типизированные колонки, NA-дисциплина, стабильные сортировки, groupby, merge, CSV/JSON I/O. ~1300 строк чистого Qualisp поверх примитивов — т.е. модуль сам написан на языке (гл. 15), а всё табличное хозяйство доступно из REPL сразу.
 
-> 🐍 **Python-аналогия.** `import tablet` ≈ `import pandas as pd`: `Tablet` ≈ `DataFrame`, `tcol` ≈ `df["col"]`, `tgroup-agg` ≈ `groupby().agg()`, `tmerge` ≈ `merge`. Разница: колонки — списки или тензоры QLISP, NA — обычный `nil`, и весь модуль детерминирован до байта.
+> 🐍 **Python-аналогия.** `import tablet` ≈ `import pandas as pd`: `Tablet` ≈ `DataFrame`, `tcol` ≈ `df["col"]`, `tgroup-agg` ≈ `groupby().agg()`, `tmerge` ≈ `merge`. Разница: колонки — списки или тензоры Qualisp, NA — обычный `nil`, и весь модуль детерминирован до байта.
 
 ## 22.1 Контракт детерминизма
 

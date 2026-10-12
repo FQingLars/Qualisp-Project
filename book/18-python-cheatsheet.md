@@ -1,10 +1,10 @@
-# Глава 18. Шпаргалка: QLISP ↔ Python
+# Глава 18. Шпаргалка: Qualisp ↔ Python
 
-Быстрый перевод между QLISP и Python-стеком (NumPy / PyTorch / scikit-learn). Имена примитивов в QLISP после `SymbolTable::intern` хранятся в верхнем регистре (`T+`, `MATMUL!`, `MSE!`, `PARAM`, `GRAD!`); пользователь может писать их в любом регистре.
+Быстрый перевод между Qualisp и Python-стеком (NumPy / PyTorch / scikit-learn). Имена примитивов в Qualisp после `SymbolTable::intern` хранятся в верхнем регистре (`T+`, `MATMUL!`, `MSE!`, `PARAM`, `GRAD!`); пользователь может писать их в любом регистре.
 
 ## 18.0 Гомоиконность (v2.3.0+)
 
-| QLISP | Python |
+| Qualisp | Python |
 |---|---|
 | `(read-from-string "(+ 1 2)")` | `ast.literal_eval("(1 + 2)")` / `eval("(1+2)", {})` |
 | `(write-to-string expr)` | `repr(expr)` / `ast.unparse(ast.parse(...))` |
@@ -26,7 +26,7 @@
 
 ## 18.1 Базовый синтаксис
 
-| QLISP | Python |
+| Qualisp | Python |
 |---|---|
 | `(+ 1 2)` | `1 + 2` |
 | `(f x y)` | `f(x, y)` |
@@ -41,13 +41,13 @@
 | `(progn a b c)` | тело функции / блок |
 | `; комментарий` | `# комментарий` |
 | `'(1 2 3)` | `[1, 2, 3]` (литерал) |
-| `(equal a b)` | `a == b` |
-| `(print "x" 42)` | `print("x", 42)` |
+| `(equal a b)` | `a == b` (для инстансов/тензоров — `a is b`, гл. 3.7) |
+| `(print (strcat "x " (to-string 42)))` | `print("x", 42)` (print — ровно один аргумент, v2.8.5) |
 | `(type-of x)` | `type(x).__name__` |
 
 ## 18.2 Списки
 
-| QLISP | Python |
+| Qualisp | Python |
 |---|---|
 | `(car xs)` / `(cdr xs)` | `xs[0]` / `xs[1:]` |
 | `(cons x xs)` | `[x] + xs` |
@@ -65,7 +65,7 @@
 
 ## 18.3 Тензоры (NumPy)
 
-| QLISP | NumPy |
+| Qualisp | NumPy |
 |---|---|
 | `(tensor ((1.0 2.0) (3.0 4.0)))` | `np.array([[1.,2.],[3.,4.]])` |
 | `(zeros (list 2 3))` | `np.zeros((2,3))` |
@@ -89,7 +89,7 @@
 
 ## 18.4 Автоград (PyTorch)
 
-| QLISP | PyTorch |
+| Qualisp | PyTorch |
 |---|---|
 | `(param (randn (list 4 2)))` | `torch.randn(4,2, requires_grad=True)` |
 | `(matmul! x w)` | `x @ w` (в графе) |
@@ -106,7 +106,7 @@
 
 ## 18.5 Слои (DL v2 ↔ torch.nn)
 
-| QLISP (v2.3.0+) | PyTorch |
+| Qualisp (v2.3.0+) | PyTorch |
 |---|---|
 | `(linear 4 2)` (из DL) | `nn.Linear(4, 2)` (но слой — cons, а не объект) |
 | `(list (linear 1 4) 'relu (linear 4 1))` | `nn.Sequential(nn.Linear(1,4), nn.ReLU(), nn.Linear(4,1))` |
@@ -121,11 +121,11 @@
 | `(weighted-lookup probs v1 v2)` | взвешенная сумма (скаляр) |
 | `(net-infer model x)` | `with torch.no_grad(): model(x)` (tape-free, для `while`) |
 
-> 🐍 Ключевое отличие: QLISP DL v2 — это **данные** (cons-список), а не объект. Модель сериализуется QSRD v2 как обычная структура. PyTorch-модель — объект с `state_dict`, требует отдельного протокола сериализации.
+> 🐍 Ключевое отличие: Qualisp DL v2 — это **данные** (cons-список), а не объект. Модель сериализуется QSRD v2 как обычная структура. PyTorch-модель — объект с `state_dict`, требует отдельного протокола сериализации.
 
 ## 18.5.1 Строки (модуль `string` ↔ `str`)
 
-| QLISP (v2.3.0+) | Python |
+| Qualisp (v2.3.0+) | Python |
 |---|---|
 | `(string-length s)` | `len(s)` |
 | `(string-split s ",")` | `s.split(",")` |
@@ -151,7 +151,7 @@
 
 ## 18.6 Классический ML (sklearn)
 
-| QLISP | scikit-learn |
+| Qualisp | scikit-learn |
 |---|---|
 | `(range 5)` / `(range 5 10 2)` | `range(5)` / `range(5, 10, 2)` |
 | `(train-test-split data target ratio)` | `train_test_split(train_size=ratio)` |
@@ -175,7 +175,7 @@
 
 ## 18.7 Символьный и нейросимвольный слой
 
-| QLISP | Python-аналог |
+| Qualisp | Python-аналог |
 |---|---|
 | `(match v (p1 r1) (p2 r2) (_ def))` | `match v: case p1: r1; case p2: r2; case _: def` |
 | `(unify a b)` | `unification.unify(a, b)` |
@@ -191,7 +191,7 @@
 
 ## 18.8 Строки, файлы, прочее
 
-| QLISP | Python |
+| Qualisp | Python |
 |---|---|
 | `(strcat a b)` | `a + b` / `f"{a}{b}"` |
 | `(substr s i n)` | `s[i:i+n]` |
@@ -206,13 +206,13 @@
 
 ## 18.8.1 QSRD v2 — бинарная сериализация (v2.3.0+)
 
-| QLISP | Python |
+| Qualisp | Python |
 |---|---|
 | `(qsrd-save "f.qsrd" obj)` | `pickle.dump(obj, f)` |
 | `(qsrd-load "f.qsrd")` | `obj = pickle.load(f)` |
 | `(qsrd-get "f.qsrd" 'field)` | `obj.field` (если QSRD — структура) |
 
-> 🐍 `pickle` теряет dtype/shape тензоров (нужен отдельный `torch.save` + `np.save`). QSRD v2 хранит всё вместе: S-выражения, тензоры с dtype и шейпом, скаляры — в одном файле с magic `"QSRD"` и u16-версией.
+> 🐍 `pickle` теряет dtype/shape тензоров (нужен отдельный `torch.save` + `np.save`). QSRD v2 хранит всё вместе: S-выражения, тензоры с dtype и шейпом (на **любой глубине** структуры — v2.8.5), скаляры — в одном файле с magic `"QSRD"` и u16-версией.
 | `(now-iso-str)` | `datetime.now().isoformat()` |
 | `(elapsed expr)` | contextmanager `timeit`/декоратор |
 | `(http-get url)` | `requests.get(url).text` |
@@ -220,7 +220,7 @@
 
 ## 18.9 Компиляция
 
-| QLISP | Python-мир |
+| Qualisp | Python-мир |
 |---|---|
 | `(setq f (jit f))` | CPython 3.13 JIT — copy-and-patch нативной страницы из S-выражения (без IR) |
 | `(start-trace)` + `(graph-param x)` + `(hlo-compile out)` + `(hlo-run hlo x ...)` | `torch.compile` / `jax.jit` |
@@ -233,7 +233,7 @@
 
 ## 18.10 FFI
 
-| QLISP | Python-мир |
+| Qualisp | Python-мир |
 |---|---|
 | `(ffi-load "lib.so")` | `ctypes.CDLL("lib.so")` |
 | `(ffi-call "sin" "float" 0.0)` | `lib.sin(0.0)` |

@@ -1,6 +1,6 @@
 # Глава 11. GPU: сегодня CPU, завтра CUDA
 
-QLISP имеет абстракцию устройств: ядро оперирует понятием «device» тензора (`Device` в `src/gpu/device.hpp`), и код пишется одинаково для CPU и (в перспективе) GPU.
+Qualisp имеет абстракцию устройств: ядро оперирует понятием «device» тензора (`Device` в `src/gpu/device.hpp`), и код пишется одинаково для CPU и (в перспективе) GPU.
 
 ## 11.1 Что работает сегодня
 
@@ -19,7 +19,7 @@ std::vector<Device *> Device::available_devices() {
 Реализация CPU — `CPUDevice` (`src/gpu/device.cpp:29`) — обёртка над SIMD ядрами (`src/core/simd.hpp`):
 
 - AVX2/FMA на x86_64: 8×float за инструкцию (`simd::add_ps`, `simd::mul_ps`, `simd::relu_ps`).
-- NEON на ARM (см. CMakeLists.txt: `HAVE_NEON` → `QLISP_HAS_NEON`).
+- NEON на ARM (см. CMakeLists.txt: `HAVE_NEON` → `QUALISP_HAS_NEON`).
 - F16 ядра: `launch_*_half` через `static_cast<Half>(...)`; на x86_64 с `-march=native` компилятор генерирует F16C.
 - `launch_matmul` — `cblas_sgemm` (OpenBLAS).
 - `alloc_pooled` / `free_pooled` — TensorBufferPool.
@@ -32,7 +32,7 @@ std::vector<Device *> Device::available_devices() {
 
 Тензоры всегда на CPU; `(device-info)` это подтверждает.
 
-CUDA-бэкенд (`src/gpu/kernels.cu`, 36 строк) присутствует в исходниках как каркас, но **не зарегистрирован** в `Device::available_devices()` и **не собирается** в релизном бинарнике v2.3.0 (требует CUDA Toolkit и тестирования на GPU). ROCm-бэкенд — в дорожной карте. Книга честно отражает это: на сегодня QLISP — CPU-early.
+CUDA-бэкенд (`src/gpu/kernels.cu`, 36 строк) присутствует в исходниках как каркас, но **не зарегистрирован** в `Device::available_devices()` и **не собирается** в релизном бинарнике v2.3.0 (требует CUDA Toolkit и тестирования на GPU). ROCm-бэкенд — в дорожной карте. Книга честно отражает это: на сегодня Qualisp — CPU-early.
 
 ## 11.2 Почему это нормально для деплоя
 
