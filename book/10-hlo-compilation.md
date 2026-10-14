@@ -44,7 +44,8 @@ struct HloNode {
     HloOp op;
     std::vector<size_t> shape;
     std::vector<HloNode*> inputs;
-    Tensor *constant_value;
+    Tensor *constant_value;   // v2.8.6: клон в хранилище трейса, а не указатель
+                              // на тензор области записи (граф переживает область)
     std::vector<HloOp> fused_ops;     // FUSION: последовательность операций
     std::vector<float> lookup_values; // LOOKUP / WEIGHTED_LOOKUP
     std::string composite_name;       // COMPOSITE: имя defhloop
@@ -190,7 +191,8 @@ void fn_range(float** params, float* out, long start, long end)
 - Круговой рейс (print → read → print) точен; QSRD v2 хранит блобы структурно (гл. 18.8).
 - COMPOSITE-ноды ездят через `GRAPH-DATA`/`GRAPH-FROM-DATA` и через `GRAPH-RUN-PASSES`; fallback-исполнитель материализует подграф COMPOSITE при запуске.
 - Именованные константы переживают проходы (id-переходы корректны).
-- Тесты: `tests/hlo_graph_data.qlsp`; закрывает пункт TODO «(print-graph) печатает граф в SExpr-виде и обратно».
+- **Запись идёт в топологическом порядке, полез обёртки FUSION (v2.8.6).** Порядок `g->nodes()` после оптимизации **не** топологический: проход fusion дописывает объединённую ноду в конец списка, тогда как ранние ноды уже на неё ссылаются (DOT 5 → FUSION 11), и `graph_build_node` спотыкался о ненущенный вход («unknown input id 11»). Эмиссия идёт post-order DFS (зависимости раньше), scope ограничен так, что ссылки ветви на объемлющий граф разрешаются в проходе родителя. Payload FUSION больше не обёрнут лишним cons'ом — `((ADD RELU))` читалось как один символ и роняло `graph_op_of` с `std::bad_alloc`.
+- Тесты: `tests/hlo_graph_data.qlsp` (в т.ч. `gd-fusion-round-trip`), `tests/image.qlsp`, `tests/production_training.qlsp`; закрывает пункт TODO «(print-graph) печатает граф в SExpr-виде и обратно».
 
 > 🐍 Это `torch.fx.Graph`/`graph_module.print_readable()` + pickle графа — только данные нативные S-выражения, и всё оптимизируется из самого языка.
 
