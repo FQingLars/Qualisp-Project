@@ -2,7 +2,7 @@
 
 Быстрый перевод между Qualisp и Python-стеком (NumPy / PyTorch / scikit-learn). Имена примитивов в Qualisp после `SymbolTable::intern` хранятся в верхнем регистре (`T+`, `MATMUL!`, `MSE!`, `PARAM`, `GRAD!`); пользователь может писать их в любом регистре.
 
-## 18.0 Гомоиконность (v2.3.0+)
+## 18.0 Гомоиконность
 
 | Qualisp | Python |
 |---|---|
@@ -34,7 +34,7 @@
 | `(\ (x) (* x x))` | `lambda x: x * x` |
 | `(defvar x 1)` | `x = 1` (модуль) |
 | `(setq x 2)` | `x = 2` |
-| `(setq a 1 b 2)` (v2.8.6) | `a, b = 1, 2` — все пары, слева направо, каждая видит предыдущую |
+| `(setq a 1 b 2)` | `a, b = 1, 2` — все пары слева направо, каждая видит предыдущую (нечётное число аргументов — ошибка) |
 | `(let ((x 1) (y 2)) ...)` | `x, y = 1, 2` (в области) |
 | `(if c a b)` | `a if c else b` |
 | `(cond (c1 r1) (c2 r2) (t r))` | `if/elif/else` |
@@ -42,9 +42,10 @@
 | `(progn a b c)` | тело функции / блок |
 | `; комментарий` | `# комментарий` |
 | `'(1 2 3)` | `[1, 2, 3]` (литерал) |
-| `(equal a b)` | `a == b` (для инстансов/тензоров — `a is b`, гл. 3.7) |
-| `(print (strcat "x " (to-string 42)))` | `print("x", 42)` (print — ровно один аргумент, v2.8.5) |
-| `(type-of x)` | `type(x).__name__` |
+| `(= a b)` | `a == b` — числа сравниваются **по значению**: `(= 0 0.0)` → `t` |
+| `(equal a b)` | `a == b` (cons/строки/символы — структурно; замыкания, HLO/JIT-программы, инстансы, тензоры — по идентичности, как `a is b`) |
+| `(print (strcat "x " (to-string 42)))` | `print("x", 42)` — `print`/`display` принимают **ровно один аргумент** |
+| `(type-of x)` | `type(x).__name__` (в Qualisp — uppercase) |
 
 ## 18.2 Списки
 
@@ -84,8 +85,11 @@
 | `(tsin t)` / `(tcos t)` / `(t/tanh t)` | `np.sin(t)` / `np.cos(t)` / `np.tanh(t)` |
 | `(concat a b)` / `(stack a b)` | `np.concatenate([a,b])` / `np.stack([a,b])` |
 | `(tensor-f16 t)` / `(tensor-f32 t)` / `(tensor-u8 t)` | `t.astype(np.float16/float32/uint8)` |
-| `(tref t i j)` | `t[i, j]` |
-| `(tensor-item t)` / `(tensor->list t)` | `t.reshape(-1)[0]` / `t.ravel().tolist()` |
+| `(tref t i)` | `t.flatten()[i]` — один индекс = плоский номер элемента |
+| `(tref t i j)` | `t[i, j]` — N индексов = координаты ровно ранга N; выход за границы — ошибка |
+| `(tensor-item t i)` | `t.flatten()[i]` — элемент по индексу (индекс обязателен) |
+| `(tensor->list t)` | `t.ravel().tolist()` |
+| `(FINITE? t)` | `np.isfinite(t).all()` — битовая проверка конечности (NaN/Inf) |
 | `(save-npy t "f.npy")` / `(load-npy "f.npy")` | `np.save` / `np.load` |
 
 ## 18.4 Автоград (PyTorch)
@@ -105,9 +109,9 @@
 | `(sample logits)` | `torch.distributions.Categorical(logits).sample()` (one-hot) |
 | `(reinforce-loss! logits idx reward)` | REINFORCE: `reward * F.cross_entropy(logits, idx)` |
 
-## 18.5 Слои (DL v2 ↔ torch.nn)
+## 18.5 Слои (DL-модель ↔ torch.nn)
 
-| Qualisp (v2.3.0+) | PyTorch |
+| Qualisp | PyTorch |
 |---|---|
 | `(linear 4 2)` (из DL) | `nn.Linear(4, 2)` (но слой — cons, а не объект) |
 | `(list (linear 1 4) 'relu (linear 4 1))` | `nn.Sequential(nn.Linear(1,4), nn.ReLU(), nn.Linear(4,1))` |
@@ -126,7 +130,7 @@
 
 ## 18.5.1 Строки (модуль `string` ↔ `str`)
 
-| Qualisp (v2.3.0+) | Python |
+| Qualisp | Python |
 |---|---|
 | `(string-length s)` | `len(s)` |
 | `(string-split s ",")` | `s.split(",")` |
@@ -182,7 +186,7 @@
 | `(unify a b)` | `unification.unify(a, b)` |
 | `(put 'cat 'legs 4)` / `(get 'cat 'legs)` | атрибуты у enum'ов / `obj.attr = 4` |
 | `(assert-fact (cat ?x))` + `(defrule ...)` + `(run-rules)` + `(query ...)` | pyDatalog / CLIPS / Prolog |
-| `(amb-let ...)` + `(require ...)` + `(amb-collect ...)` | `itertools.product` + backtracking |
+| `(amb-let ...)` + `(require ...)` + `(amb-collect ...)` | `itertools.product` + backtracking (`require` — только `T`/`nil`, `amb-collect` перечисляет **все** решения) |
 | `(ns-if logits (("a") branch-a) (("b") branch-b))` | tree-of-experts (нет аналога) |
 | `(ns-grad! loss 'cat)` | per-sample STE + guilt detector (нет аналога) |
 | `(second-best scores)` | второй максимум (ties → соседнее вхождение; откат маршрута) |
@@ -197,15 +201,19 @@
 | `(strcat a b)` | `a + b` / `f"{a}{b}"` |
 | `(substr s i n)` | `s[i:i+n]` |
 | `(number-to-string 42)` | `str(42)` |
-| `(to-string x)` (v2.3.0+, общий) | `str(x)` |
+| `(to-string x)` (общий) | `str(x)` |
 | `(slurp "f")` / `(spit "f" s)` | `open("f").read()` / `.write(s)` |
 | `(read-lines "f")` | `open("f").readlines()` |
 | `(read-csv "f.csv")` | `csv.reader(open("f.csv"))` |
 | `(re-find p s)` / `(re-replace p r s)` | `re.search` / `re.sub` |
 | `(re-split p s)` | `re.split(p, s)` |
 | `(now-ts)` / `(sleep s)` | `time.time()` / `time.sleep(s)` |
+| `(now-iso-str)` | `datetime.now().isoformat()` |
+| `(elapsed expr)` | contextmanager `timeit`/декоратор |
+| `(http-get url)` | `requests.get(url).text` |
+| `(dashboard port)` + `(log-metric "loss" v)` | TensorBoard |
 
-## 18.8.1 QSRD v2 — бинарная сериализация (v2.3.0+)
+## 18.8.1 QSRD v2 — бинарная сериализация
 
 | Qualisp | Python |
 |---|---|
@@ -213,11 +221,7 @@
 | `(qsrd-load "f.qsrd")` | `obj = pickle.load(f)` |
 | `(qsrd-get "f.qsrd" 'field)` | `obj.field` (если QSRD — структура) |
 
-> 🐍 `pickle` теряет dtype/shape тензоров (нужен отдельный `torch.save` + `np.save`). QSRD v2 хранит всё вместе: S-выражения, тензоры с dtype и шейпом (на **любой глубине** структуры — v2.8.5), скаляры — в одном файле с magic `"QSRD"` и u16-версией.
-| `(now-iso-str)` | `datetime.now().isoformat()` |
-| `(elapsed expr)` | contextmanager `timeit`/декоратор |
-| `(http-get url)` | `requests.get(url).text` |
-| `(dashboard port)` + `(log-metric "loss" v)` | TensorBoard |
+> 🐍 `pickle` теряет dtype/shape тензоров (нужен отдельный `torch.save` + `np.save`). QSRD v2 хранит всё вместе: S-выражения, тензоры с dtype и шейпом (на **любой глубине** структуры), скаляры — в одном файле с magic `"QSRD"` и u16-версией.
 
 ## 18.9 Компиляция
 

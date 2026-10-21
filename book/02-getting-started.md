@@ -5,17 +5,17 @@
 ### Готовый бинарник (Linux)
 
 ```bash
-curl -L https://github.com/FQingLars/Qualisp-Project/releases/latest/download/qualisp-linux-x86_64 -o qualisp
+curl -L https://github.com/FQingLars/Qualisp-Project/releases/download/v2.9.0/qualisp-linux-x86_64 -o qualisp
 chmod +x qualisp && mv qualisp ~/.local/bin/
 ```
 
 Бинарники (`qualisp`, `qualisp-lsp`, `qvalent`) публикуются в релизах этого репозитория и собираются CI из исходников компилятора (Linux x86_64; Windows — MSYS2 MinGW64). Контрольные суммы — в файле `SHA256SUMS` рядом с ассетами релиза.
 
-> ✅ **Рантайм (Linux, v2.7.0+).** Бинарник больше **не линкуется с LLVM** — динамические зависимости скромные: `libopenblas`, `libgomp`, `libstdc++`, `libc` (плюс `libgfortran` косвенно, через OpenBLAS). Достаточно `apt install libopenblas0` (или эквивалента). Проверка: `echo '(+ 1 2)' | qualisp`.
+> ✅ **Рантайм (Linux).** Бинарник **не линкуется с LLVM** — динамические зависимости скромные: `libopenblas`, `libgomp`, `libstdc++`, `libc` (плюс `libgfortran` косвенно, через OpenBLAS). Достаточно `apt install libopenblas0` (или эквивалента). Проверка: `echo '(+ 1 2)' | qualisp`.
 
 ### Готовый бинарник (Windows)
 
-Скачайте `qualisp-windows-x86_64.zip` со страницы релизов и распакуйте; `qualisp.exe`, `qualisp-lsp.exe`, `qvalent.exe` готовы к работе (MinGW-сборка, x86_64; начиная с v2.7.1 — полностью зелёный CI).
+Скачайте `qualisp-windows-x86_64.zip` со страницы релизов и распакуйте; `qualisp.exe`, `qualisp-lsp.exe`, `qvalent.exe` готовы к работе (MinGW-сборка, x86_64; CI зелёный на Linux и Windows).
 
 ### Сборка из исходников
 
@@ -27,7 +27,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Требования: GCC 13+ / Clang 16+ (C++20), CMake 3.16+, OpenBLAS, OpenMP. **LLVM не нужен** — с v2.7.0 весь нативный код (JIT замыканий и HLO-кёрнелы) строится собственными стенсил-эмиттерами (гл. 10, 20). GPU: CUDA Toolkit (опционально, код присутствует, но не тестирован).
+Требования: GCC 13+ / Clang 16+ (C++20), CMake 3.16+, OpenBLAS, OpenMP. **LLVM не нужен** — весь нативный код (JIT замыканий и HLO-кёрнелы) строится собственными стенсил-эмиттерами (гл. 10, 20). GPU-бэкенда в проекте нет: вычисления идут на CPU (гл. 11).
 
 Кросс-компиляция вспомогательных бинарников (`qualisp-lsp`/`qvalent`) под Windows с Linux-машины через MinGW описана в `README.md` исходного дерева (`cmake/x86_64-w64-mingw32.cmake`); для `qualisp` корректный путь — нативная MSYS2-сборка (см. гл. 19).
 
@@ -39,15 +39,13 @@ cmake --build build -j$(nproc)
 | `qualisp-lsp` | Language Server (VS Code, neovim, Emacs) | pylance |
 | `qvalent` | Пакетный менеджер (`qvalent.toml`) | `pip` |
 
-Отдельного компилятора больше нет: с v2.4.0 интерпретатор и JIT живут в одном бинарнике `qualisp` — это следствие «инварианта одной формы» (гл. 1.3, 20). Все три инструмента собираются из одних исходников; `qualisp-lsp` — отдельная цель только из `src/lsp/server.cpp`.
+Отдельного компилятора нет: интерпретатор и JIT живут в одном бинарнике `qualisp` — это следствие «инварианта одной формы» (гл. 1.3, 20). Все три инструмента собираются из одних исходников; `qualisp-lsp` — отдельная цель только из `src/lsp/server.cpp`.
 
 ## 2.3 REPL
 
 ```text
 $ qualisp
 Qualisp
-dl-loaded
-ns-loaded
 Enter expressions, press Ctrl+D to exit.
 
 > (+ 1 2 3 4 5)
@@ -58,11 +56,11 @@ Enter expressions, press Ctrl+D to exit.
 => 16.0
 ```
 
-REPL при старте **автоматически загружает все 13 модулей стандартной библиотеки** (см. `embedded_modules[]` в `src/main.cpp`): `core`, `string`, `dl`, `ns`, `ml`, `io`, `regex`, `audio`, `datetime`, `pkg`, `errors`, `visual`, `tablet` (v2.7.2, гл. 22). Они вшиты в бинарник через `cmake/stdlib_embed.cmake` (на этапе сборки `.qlsp` превращаются в `.h` через `cmake/gen_stdlib_header.cmake` и компилируются в бинарник). С v2.3.0 поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
+REPL при старте **автоматически загружает все 13 модулей стандартной библиотеки** (см. `embedded_modules[]` в `src/main.cpp`): `core`, `string`, `dl`, `ns`, `ml`, `io`, `regex`, `audio`, `datetime`, `pkg`, `errors`, `visual`, `tablet` (гл. 22). Они вшиты в бинарник через `cmake/stdlib_embed.cmake` (на этапе сборки `.qlsp` превращаются в `.h` через `cmake/gen_stdlib_header.cmake` и компилируются в бинарник). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
 
 > 🐍 **Python-аналогия.** Это как если бы `python` стартовал с предимпортированными `numpy`, `torch`, `sklearn`, `re`, `datetime`, `time`, `urllib`, `tensorboard`, `str`.
 
-Многострочный ввод работает по скобкам и кавычкам: незакрытый `(` или незакрытая `"` продолжают ввод.
+Многострочный ввод работает по скобкам и кавычкам: незакрытый `(` или незакрытая `"` продолжают ввод. Состояние «мы внутри строки» — отдельный флаг, поэтому REPL не зависает, если строковый литерал стоит в первой строке формы, и перенос строки внутри строки его не сбрасывает.
 
 После каждого выражения REPL вызывает `Interpreter::reset_scratch()` — disposable-область сбрасывается, буферы тензоров и cons-ячейки возвращаются в пулы (гл. 5).
 
@@ -96,7 +94,7 @@ Hello, Qualisp!
 (import VISUAL)    ;; дашборд метрик (TensorBoard-подобный HTTP)
 ```
 
-В исходниках есть также модуль `DL` (v2.3.0+: ~100 строк в `stdlib/dl.qlsp`: `linear`, `net-forward`, `train-step`, `train-epochs`) — он вшит в бинарник наравне с остальными и доступен через `(import DL)`. С v2.3.0 модель — cons-список, слои — данные, а не замыкания.
+В исходниках есть также модуль `DL` (~100 строк в `stdlib/dl.qlsp`: `linear`, `net-forward`, `train-step`, `train-epochs`) — он вшит в бинарник наравне с остальными и доступен через `(import DL)`. Модель — cons-список, слои — данные, а не замыкания.
 
 `(import M)` возвращает `"m-loaded"` и гарантирует, что модуль загружен однократно. Для частичного импорта: `(import-from (dl linear train-step))` поднимает только указанные имена.
 
@@ -118,7 +116,7 @@ Hello, Qualisp!
 
 ## 2.7 Редактор и LSP
 
-`qualisp-lsp` — Language Server без внешних зависимостей (JSON-парсер встроен, компиляторный движок не линкуется). Начиная с v2.3.8 это полноценный сервер:
+`qualisp-lsp` — Language Server без внешних зависимостей (JSON-парсер встроен, компиляторный движок не линкуется). Это полноценный сервер:
 
 - **Диагностики**: незакрытая форма (с позицией открывающей скобки), лишняя `)`, незакрытая строка — точные диапазоны, инкрементальная синхронизация документа (`change: 2`).
 - **Навигация**: goto-definition (в т.ч. cross-file), references, documentHighlight, rename по всему воркспейсу, `workspace/symbol`, `documentSymbol` (14 def-видов: `defun`/`defmacro`/`defvar`/`defhloop`/… + `deftest`).
@@ -128,6 +126,8 @@ Hello, Qualisp!
 - **VS Code**: любой LSP-клиент, команда запуска `qualisp-lsp`.
 - **neovim**: `nvim-lspconfig` с custom config.
 - **Emacs**: `lsp-mode` / `eglot`.
+
+Тот же движок работает в пакетном режиме: `python3 tools/qlsp-check.py FILE.qlsp` — диагностика читателя (незакрытые/лишние скобки) и структурный план `defun`-дерева (`--symbols`). Для C++-исходников компилятора навигация идёт через `clangd` по `build/compile_commands.json`.
 
 ## 2.8 Первая ML-программа
 

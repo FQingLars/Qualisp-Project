@@ -1,21 +1,22 @@
 # Глава 15. Стандартная библиотека
 
-Все модули стандартной библиотеки **вшиты в бинарник** (`stdlib/*.qlsp` генерируются в заголовки через `xxd -i` и компилируются в бинарник на этапе сборки — `cmake/stdlib_embed.cmake`). **13 модулей** загружаются **при старте** REPL/раннера (итерация по `embedded_modules[]` в `src/main.cpp`), причём порядок важен: `core` грузится первым (через `Interpreter::mark_module_loaded(m->name)`). `(import M)` — идиома для явности (повторный импорт — дешёвый no-op). С v2.3.0 поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
+Все модули стандартной библиотеки **вшиты в бинарник** (`stdlib/*.qlsp` генерируются в заголовки через `xxd -i` и компилируются в бинарник на этапе сборки — `cmake/stdlib_embed.cmake`). **13 модулей** загружаются **при старте** REPL/раннера (итерация по `embedded_modules[]` в `src/main.cpp`), причём порядок важен: `core` грузится первым (через `Interpreter::mark_module_loaded(m->name)`). `(import M)` — идиома для явности (повторный импорт — дешёвый no-op). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
 
 | Модуль | Файл | Размер | Содержание |
 |---|---|---|---|
-| `core` | `stdlib/core.qlsp` | 94 строки | утилиты списков (итеративные с v2.7.4: `length`/`reverse`/`member`/`last`/`butlast`/`nth` не жгут стек), `let*`, тестовый фреймворк |
-| `string` | `stdlib/string.qlsp` | (v2.3.0+) | строковые операции, char-коды, примитивы + композитные |
-| `ml` | `stdlib/ml.qlsp` | 377 строк | классический ML: KNN, NB, Tree, RF, GB, KMeans, CV, GridSearch, потери |
-| `dl` | `stdlib/dl.qlsp` | 100+ строк (v2.3.0+) | слои-как-данные, `linear`, `net-forward`, `train-step`, `train-epochs` |
-| `io` | `stdlib/io.qlsp` | 66 строк | файлы, CSV (RFC-4180), `slurp`, `spit` |
-| `regex` | `stdlib/regex.qlsp` | 17 строк | регулярки: `re-find`, `re-replace`, `re-split` |
-| `audio` | `stdlib/audio.qlsp` | 101 строка | DSP: окна, синус, DFT, mel-шкала, dB |
-| `datetime` | `stdlib/datetime.qlsp` | 40 строк | время: `now-ts`, `sleep`, `elapsed` |
-| `pkg` | `stdlib/pkg.qlsp` | 77 строк | `pkg-install` через `http-get` |
-| `errors` | `stdlib/errors.qlsp` | 65 строк | `make-error`, `throw`, `assert`, `try`, тип-предикаты |
-| `visual` | `stdlib/visual.qlsp` | 33 строки | TensorBoard-подобный HTTP-дашборд |
-| `tablet` | `stdlib/tablet.qlsp` | 1304 строки (v2.7.2) | DataFrame-аналог pandas — гл. 22 |
+| `core` | `stdlib/core.qlsp` | ~124 строки | утилиты списков (итеративные: `length`/`reverse`/`member`/`last`/`butlast`/`nth` не жгут стек), `let*`, тестовый фреймворк |
+| `string` | `stdlib/string.qlsp` | ~60 строк | строковые операции, char-коды, примитивы + композитные |
+| `ml` | `stdlib/ml.qlsp` | ~378 строк | классический ML: KNN, NB, Tree, RF, GB, KMeans, CV, GridSearch, потери |
+| `dl` | `stdlib/dl.qlsp` | ~159 строк | слои-как-данные, `linear`, `net-forward`, `train-step`, `train-epochs` |
+| `ns` | `stdlib/ns.qlsp` | ~126 строк | экспорт нейросимвольного слоя: маршрутизация по слотам, RL-агент-кодер (гл. 14.10) |
+| `io` | `stdlib/io.qlsp` | ~80 строк | файлы, CSV (RFC-4180), `slurp`, `spit` |
+| `regex` | `stdlib/regex.qlsp` | ~17 строк | регулярки: `re-find`, `re-replace`, `re-split` |
+| `audio` | `stdlib/audio.qlsp` | ~102 строки | DSP: окна, синус, DFT, mel-шкала, dB |
+| `datetime` | `stdlib/datetime.qlsp` | ~90 строк | время: `now-ts`, `sleep`, `elapsed` |
+| `pkg` | `stdlib/pkg.qlsp` | ~74 строки | `pkg-install` через `http-get` |
+| `errors` | `stdlib/errors.qlsp` | ~66 строк | `make-error`, `throw`, `assert`, `try`, тип-предикаты |
+| `visual` | `stdlib/visual.qlsp` | ~33 строки | TensorBoard-подобный HTTP-дашборд |
+| `tablet` | `stdlib/tablet.qlsp` | ~1313 строк | DataFrame-аналог pandas — гл. 22 |
 
 > 🐍 «13 вшитых модулей в одном бинарнике» — это «один fat-пакет в одном бинарнике». Python-аналог: монолитный Docker-образ с предустановленными `numpy/torch/sklearn/pandas/tensorboard` — только без GIL и без 4 ГБ зависимостей.
 
@@ -29,7 +30,9 @@
 (run-tests)
 ```
 
-> 🐍 `pytest` в миниатюре: `deftest` ≈ `def test_*`, `run-tests` ≈ запуск pytest, `assert-eq` ≈ `assert a == ==`. Имена тестов склеиваются через `strcat` с префиксом `"test::"`. Сводка прогона печатает счётчик вида `INT/INT passed` — это тоже `strcat` над `type-of`-символами (с v2.8.5 не-строковые аргументы `strcat` печатаются как `WRITE-TO-STRING`, а не молча пропускаются).
+> 🐍 `pytest` в миниатюре: `deftest` ≈ `def test_*`, `run-tests` ≈ запуск pytest, `assert-eq` ≈ `assert a == ==`. Имена тестов склеиваются через `strcat` с префиксом `"test::"`. Сводка прогона печатает счётчик вида `INT/INT passed` — это тоже `strcat` над `type-of`-символами: не-строковые аргументы `strcat` печатаются как `WRITE-TO-STRING`, а не молча пропускаются.
+
+Оговорка о числах: release собирается с `-ffast-math`, поэтому сравнение плавающих в release ненадёжно (для NaN оно истинно). Единственный надёжный способ проверить конечность — примитив `(FINITE? t)` (битовая проверка), а не сравнение; числовые пороги в тестах ставятся выше baseline вырожденного решения.
 
 Для тензоров есть `assert-zero` — проверка, что тензор почти нулевой (стандартная проверка в тестах градиентов):
 
@@ -43,9 +46,9 @@
 
 Также определены 16 сокращений `car`/`cdr`: `caar`, `cadr`, `cdar`, `cddr`, `caaar`, `caadr`, `cadar`, `caddr`, `cdaar`, `cdadr`, `cddar`, `cdddr`, плюс `second`, `third`, `fourth`, `first`, `rest`.
 
-## 15.2 string — строковые операции (v2.3.0+)
+## 15.2 string — строковые операции
 
-Новый модуль, зарегистрированный в `embedded_modules[]` сразу после `core`. Два слоя — примитивы и композитные функции.
+Модуль зарегистрирован в `embedded_modules[]` сразу после `core`. Два слоя — примитивы и композитные функции.
 
 ### Примитивы (C++, регистрируются через `register_string_primitives`)
 
@@ -63,7 +66,7 @@
 | `CHAR-CODE ch` | ASCII-код символа | `ord(ch)` |
 | `CODE-CHAR n` | символ по ASCII-коду | `chr(n)` |
 | `STRING-TO-NUMBER s` | парсинг числа | `float(s)` / `int(s)` |
-| `STRING-CONTAINS s sub` | предикат вхождения (примитив с v2.3.7) | `sub in s` |
+| `STRING-CONTAINS s sub` | предикат вхождения | `sub in s` |
 | `STRING< a b` | лексикографическое `<` | `a < b` (для строк) |
 
 ### Композитные (на примитивах, в `stdlib/string.qlsp`)
@@ -71,7 +74,7 @@
 ```lisp
 (import STRING)
 
-(string-contains s sub)         ; STRING-INDEX, потом nil-check (с v2.3.7 есть и примитив STRING-CONTAINS)
+(string-contains s sub)         ; STRING-INDEX, потом nil-check (есть и примитив STRING-CONTAINS)
 (string-starts-with s prefix)
 (string-ends-with s suffix)
 (string-slice s start end)      ; подстрока
@@ -86,7 +89,7 @@
 
 ### Замечание о `type-of`
 
-С v2.3.0 `type-of` возвращает uppercase-имена типов:
+`type-of` возвращает uppercase-имена типов:
 
 | Значение | `type-of` | Python `type(x).__name__` |
 |---|---|---|
@@ -115,7 +118,7 @@
 (write-csv "out.csv" rows)         ;; строки → CSV-файл        csv.writer
 ```
 
-CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/кавычками/переводами строк берутся в кавычки, `""` — экранирование кавычки внутри поля, CRLF читается; с v2.7.2 `read-csv` корректно разворачивает переводы строк **внутри** кавычек. Пустые строки пропускаются (семантика `skip_blank_lines=True` у pandas). Круговой рейс точен:
+CSV читается и пишется по RFC-4180: поля с запятыми/кавычками/переводами строк берутся в кавычки, `""` — экранирование кавычки внутри поля, CRLF читается, переводы строк **внутри** кавычек корректно разворачиваются. Пустые строки пропускаются (семантика `skip_blank_lines=True` у pandas). Круговой рейс точен:
 
 ```lisp
 (write-csv "/tmp/t.csv" (list (list "a" "b") (list "1" "2,5") (list "3" "4")))
@@ -124,7 +127,7 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 
 Реализация — на строковых примитивах (`STRING-SPLIT`/`STRING-JOIN`/`SUBSTR`), без посимвольных проходов; нижележащие примитивы файлов — `READ-FILE`/`WRITE-FILE`/`FILE-EXISTS?`.
 
-> ⚠️ **Парсер итеративен (v2.8.6).** `read-csv` больше не рекурсирует по одному символу: это конечный автомат по RFC-4180 на `while` + `setq`-накопление (идиома train-step — scratch итерации освобождается на чекпоинте, накопленные записи живут в биндингах `let`). Рекурсия по символам на реальном файле в 400 строк (~14 тыс. символов) переполняла guard глубины `eval` (10 000) по умолчанию — то есть `tcsv-read` в Tablet не мог загрузить продакшен-размерные данные, не подняв `EVAL-MAX-DEPTH` (а поднятый лимит при стеке 8 МБ падает в SIGSEGV вместо ошибки — ровно то, от чего guard и защищает). Теперь 400 строк читаются на дефолтной глубине; семантика прежняя (кавычки держат запятые и переводы строк, `""` — экранирование, CRLF и одиночный CR, пропуск пустых строк, хвостовая неполная запись). Сигнатура внутреннего помощника сузилась до `(csv-parse-all s n)`. Тест: `io-read-csv-scales-400-rows`.
+> ⚠️ **Парсер итеративен.** `read-csv` не рекурсирует по одному символу: это конечный автомат по RFC-4180 на `while` + `setq`-накопление (идиома train-step — scratch итерации освобождается на чекпоинте, накопленные записи живут в биндингах `let`). Так `read-csv` держит продакшен-размерные CSV на дефолтной глубине `eval`: файл в 400 строк читается без поднятия `EVAL-MAX-DEPTH` (а поднятый лимит при стеке 8 МБ падает в SIGSEGV вместо ошибки — ровно то, от чего guard и защищает). Семантика прежняя: кавычки держат запятые и переводы строк, `""` — экранирование, CRLF и одиночный CR, пропуск пустых строк, хвостовая неполная запись. Тест: `io-read-csv-scales-400-rows`.
 
 ## 15.4 REGEX — регулярные выражения
 
@@ -198,9 +201,9 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 (assert-type v 'fixnum "v должен быть целым")
 ```
 
-С v2.7.1 предикаты — честные (по тегам значений, не по `type-of`-строкам); `type-check` проверяет по имени типа (`int`/`float`/`string`/`list`/`tensor`/`nil`).
+Предикаты — честные (по тегам значений, не по `type-of`-строкам); `type-check` проверяет по имени типа (`int`/`float`/`string`/`list`/`tensor`/`nil`).
 
-С v2.3.4 `CATCH-ERROR` — настоящий примитив: возвращает `((T result) | (NIL "message"))`, поэтому `try` сохраняет результат тела (а не только обрабатывает ошибку); сглатывающий throw-стаб из `pkg.qlsp` удалён (см. гл. 12.6).
+`CATCH-ERROR` — настоящий примитив: возвращает `((T result) | (NIL "message"))`, поэтому `try` сохраняет результат тела (а не только обрабатывает ошибку).
 
 > 🐍 `try`-макрос ≈ `try/except e:`. Внутри `try` оборачивает body в `(lambda () body)` и вызывает через `catch-error`; ошибка связывается с символом из `catch-clause`.
 
@@ -230,7 +233,7 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 
 Внутри — `http-get` (примитив `prim_http_get`), `pkg-install-branch` идёт через `/tmp/qualisp-pkg-<name>/`, скачивает `pkg.qlsp` манифест и указанные в нём файлы через raw.githubusercontent.com. Подробнее — в главе 16.
 
-## 15.10 IMPORT-FROM (v2.3.0+)
+## 15.10 IMPORT-FROM
 
 Частичный импорт: поднимает только перечисленные имена из модуля, не весь модуль.
 
@@ -251,7 +254,7 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 
 Полезно в больших моделях — ускоряет загрузку и уменьшает namespace pollution.
 
-## 15.11 BOUNDP (v2.3.0+)
+## 15.11 BOUNDP
 
 ```lisp
 (boundp 'x)                ; T, если X связана в текущем/глобальном env
@@ -267,14 +270,14 @@ CSV переписан по RFC-4180 (v2.7.1): поля с запятыми/ка
 | `string` | строки, char-коды | `str` (Python 3.6+) |
 | `ml` | классический ML + потери/softmax (377 строк на самом Qualisp) | scikit-learn |
 | `dl` | слои-как-данные, `linear`/`net-forward`/`train-step` | `torch.nn` (стиль Sequential) |
-| `io` | файлы, CSV (RFC-4180, v2.7.1) | `open`, `csv` |
+| `ns` | экспорт нейросимвольного слоя, RL-агент-кодер | (нет аналога) |
+| `io` | файлы, CSV (RFC-4180) | `open`, `csv` |
 | `regex` | регулярки | `re` |
 | `audio` | DSP, окна, FFT, STFT, mel | `scipy.signal`, `librosa` |
 | `datetime` | время | `time`, `datetime` |
 | `pkg` | пакеты из GitHub | `pip` (мини) |
 | `errors` | ошибки, try, assert | exceptions |
 | `visual` | дашборд метрик | TensorBoard |
-| `ns` | экспорт нейросимвольного слоя | (нет аналога) |
-| `tablet` | DataFrame-аналог pandas, детерминированный (v2.7.2) | `pandas` |
+| `tablet` | DataFrame-аналог pandas, детерминированный | `pandas` |
 
-**Tablet (v2.7.2).** DataFrame-модуль на чистом Qualisp поверх примитивов реализован целиком (T0–T9, 156 тестов): типизированные колонки, стабильные сортировки, groupby/merge с детерминированным порядком, `tcsv-read`/`tcsv-write`, JSON rows, окна. Подробности — гл. 22.
+**Tablet.** DataFrame-модуль на чистом Qualisp поверх примитивов реализован целиком: типизированные колонки, стабильные сортировки, groupby/merge с детерминированным порядком, `tcsv-read`/`tcsv-write`, JSON rows, окна. Подробности — гл. 22.

@@ -75,18 +75,17 @@ Qualisp — язык с **постепенной типизацией** (gradual
 
 ## 4.5 Интроспекция типов
 
-Примитив `TYPE-OF` (`prim_type_of`):
+Примитив `TYPE-OF` (`prim_type_of`) возвращает имя типа **в верхнем регистре** — по конвенции intern-символов (`T+`, `MATMUL!` и т.д.):
 
 ```lisp
-(type-of 3)         ; → int
-(type-of 3.5)       ; → float
-(type-of "s")       ; → string
-(type-of '(1 2))    ; → cons
-(type-of (tensor ((1.0))))  ; → tensor
-(type-of car)       ; → primitive / closure
+(type-of 3)         ; → INT
+(type-of 3.5)       ; → FLOAT
+(type-of "s")       ; → STRING
+(type-of '(1 2))    ; → LIST
+(type-of (tensor ((1.0))))  ; → TENSOR
 ```
 
-> 🐍 `type-of` ≈ `type(x).__name__`.
+> 🐍 `type-of` ≈ `type(x).__name__`, только с uppercase-именами.
 
 ## 4.6 Проверка типов вручную
 
@@ -94,17 +93,17 @@ Qualisp — язык с **постепенной типизацией** (gradual
 
 ```lisp
 (import ERRORS)
-(assert-type 3.14 'float)       ; бросает ошибку, если не float
-(type-check 3 'int)             ; → t
+(assert-type 3 'fixnum "v должен быть целым")   ; бросает ошибку, если не целое
+(type-check 3 'int)                             ; → t
 ```
 
-Внутри `type-check` использует предикаты `is-fixnum?`, `is-flonum?`, `is-string?`, `is-cons?`, `is-tensor?`, `is-nil?` — все возвращают `nil` по умолчанию (заглушки-плейсхолдеры в `errors.qlsp`), в полноценной сборке переопределяются как C++-примитивы.
+`type-check` проверяет по имени типа (`int`/`float`/`string`/`list`/`tensor`/`nil`), а точные предикаты `is-fixnum?`, `is-flonum?`, `is-number?`, `is-string?`, `is-cons?`, `is-tensor?`, `is-nil?` смотрят на теги самих значений — их результат не зависит от строкового имени типа.
 
-## 4.8 `type-of` возвращает uppercase-имена (v2.3.0+)
+## 4.7 `type-of` возвращает uppercase-имена
 
-С v2.3.0 `type-of` нормализует имена типов в **uppercase** через `intern` (как и все остальные символы Qualisp):
+`type-of` нормализует имена типов в **uppercase** через `intern` (как и все остальные символы Qualisp):
 
-| Значение | `type-of` (v2.3.0+) | `type(x).__name__` (Python) |
+| Значение | `type-of` | `type(x).__name__` (Python) |
 |---|---|---|
 | `42` | `INT` | `int` |
 | `3.14` | `FLOAT` | `float` |
@@ -118,10 +117,11 @@ Qualisp — язык с **постепенной типизацией** (gradual
 
 > 🐍 В Python имена типов в lowercase, в Qualisp — uppercase. Это согласовано с конвенцией intern-символов (`T+`, `MATMUL!` и т.д.).
 
-Главное изменение: cons-ячейки теперь сообщаются как `LIST` (а не `CONS`). Это упрощает DSL-валидацию и проверки типов: `(if (equal (type-of x) 'LIST) ...)`.
+Cons-ячейки сообщаются как `LIST`. Это упрощает DSL-валидацию и проверки типов: `(if (equal (type-of x) 'LIST) ...)`.
 
-## 4.7 Известные ограничения (TODO)
+## 4.8 Известные ограничения
 
+- `let` под биндингом с 1- или 2-байтным dtype теряет свои биндинги — обходной путь: сохранить значение через `defvar`.
 - `Tensor::is_stable` и `Tensor::size_bytes` пока **не реализованы** (см. `ARCHITECTURE.md` шапка и `TODO.md`).
 - `nn.qlsp`/`optim.qlsp`/`data.qlsp` — планируемые stdlib-расширения для типизированных слоёв.
-- Self-hosting (Phase 12) перепишет `EnvFrame` с C++ `std::map` на SExpr-alist и откроет дорогу для более богатого вывода типов в `defun`-сигнатурах.
+- Self-hosting перепишет `EnvFrame` с C++ `std::map` на SExpr-alist и откроет дорогу для более богатого вывода типов в `defun`-сигнатурах.

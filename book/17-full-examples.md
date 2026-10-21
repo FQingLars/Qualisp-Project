@@ -2,6 +2,11 @@
 
 Два канонических примера из `examples/` исходного репозитория, разобранных построчно, с Python-эквивалентами. NB: имена примитивов и функций в Qualisp после `intern` хранятся в верхнем регистре (`T+`, `MATMUL!`, `MSE!`, `PARAM`, `GRAD!`), но из-за регистронезависимости вы можете писать их как угодно — книга использует стиль «как есть», для соответствия Lisp-идиому. Все вызовы тензорных функций возвращают тензоры; `!`-операции записывают узлы на autograd-ленту.
 
+Два контракта, которые видны в примерах и часто спотыкают новичков:
+
+- **`print` и `display` принимают ровно один аргумент.** Чтобы напечатать несколько значений, склеивайте их сами: `(print (strcat "epoch " (to-string iter)))`.
+- **Числа сравниваются по значению, а не по представлению:** `=` и `equal` дают `t` для `0` и `0.0`; для значений с идентичностью (замыкания, HLO/JIT-программы, инстансы, тензоры) сравнение идёт по адресу, а `(equal x x)` истинно для любого живого значения.
+
 ## 17.1 Линейная регрессия: обучение + HLO-инференс
 
 **Задача.** Синтетические данные `y = 2x + 1 + noise`. Обучаем `w`, `b` методом MSE + SGD, затем компилируем forward в нативный код.
@@ -31,8 +36,9 @@
         (grad! loss)
         (sgd-step w lr)
         (sgd-step b lr)
-        (if (equal (mod iter 40) 0)
-          (progn (print "epoch") (print iter) (print loss)))
+        (if (= (mod iter 40) 0)
+          (progn (print (strcat "epoch " (to-string iter)))
+                 (print loss)))
         (train-loop (+ iter 1) max-iter)))))
 
 (train-loop 1 200)
@@ -93,7 +99,9 @@
         (grad! loss)
         (sgd-step w1 lr) (sgd-step b1 lr)
         (sgd-step w2 lr) (sgd-step b2 lr)
-        (if (equal (mod iter 100) 0) (progn (print "epoch") (print iter) (print loss)))
+        (if (= (mod iter 100) 0)
+          (progn (print (strcat "epoch " (to-string iter)))
+                 (print loss)))
         (train-epoch (+ iter 1) max-iter)))))
 
 (train-epoch 1 500)
