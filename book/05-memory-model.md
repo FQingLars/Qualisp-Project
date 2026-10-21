@@ -253,16 +253,20 @@ RC-контракта, worklist-каскада и счётчиков `(mem-repor
 ```lisp
 (print (mem-report))
 ;; → (("names" . 0) ("payloads" . 0) ("progs" . 0) ("tensors" . 0)
-;;     ("shared" . 0) ("stable-bytes" . 123664) ("scratch-bytes" . 0)
-;;     ("scratch-cells" . 5) ("stable-cells" . 25631)
-;;     ("stable-cells-released" . 22320) ("buffers-released" . 0)
-;;     ("progs-released" . 0))
+;;     ("shared" . 0) ("stable-bytes" . 123856) ("scratch-bytes" . 3922)
+;;     ("scratch-cells" . 25314) ("stable-cells" . 25319)
+;;     ("stable-cells-released" . 22774) ("cells-acquired" . 73407)
+;;     ("cell-pool-cells" . 65536) ("immortal-cells" . 1) ("jit-observations" . 0)
+;;     ("buffers-released" . 0) ("progs-released" . 0))
 ```
 
 Ключи: `names`/`payloads`/`progs`/`tensors`/`shared` — реестры и их содержимое,
 `stable-bytes`/`scratch-bytes` — байты арен, `scratch-cells`/`stable-cells` — живые
-ячейки, `stable-cells-released` — освобождённые ячейки, `buffers-released` и
-`progs-released` — счётчики death-hook'ов (освобождённые тензорные буферы и HLO-программы).
+ячейки, `stable-cells-released` — освобождённые ячейки, `cells-acquired` — сколько
+ячеек пул выдал за всё время, `cell-pool-cells` — сколько ячеек в пуле (ёмкость
+блока), `immortal-cells` — бессмертные ячейки (всегда одна — `nil`),
+`jit-observations` — наблюдения типов для JIT, `buffers-released` и `progs-released` —
+счётчики death-hook'ов (освобождённые тензорные буферы и HLO-программы).
 
 Проверяемость контракта обеспечивают два гейта:
 
