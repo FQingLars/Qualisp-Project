@@ -245,3 +245,18 @@
 | `(ffi-call "atan2" "float" 1.0 1.0)` | `lib.atan2(1.0, 1.0)` |
 | `(ffi-call "strlen" "int" "hello")` | `lib.strlen(b"hello")` |
 | `(ffi-import "libfoo.so" 'fn)` | `cdll.libfoo.fn` |
+
+## 18.11 Параллелизм и дифференцируемые функции
+
+| Qualisp | Python-мир |
+|---|---|
+| `(async-run form)` → ручка | `executor.submit(fn)` |
+| `(async-wait handle)` | `future.result()` |
+| `(async-collect handles)` | `[f.result() for f in futures]` |
+| `(async-map fn lst)` | `list(executor.map(fn, lst))` |
+| `(async-chan)` / `(async-send ch v)` / `(async-recv ch)` / `(async-close ch)` | `queue.Queue()` / `put` / `get` / `task_done` |
+| `(async-threads)` | размер пула `ThreadPoolExecutor` |
+| тензорная операция (OpenMP + OpenBLAS внутри) | `torch`-операция над всеми ядрами |
+| `(deftape! name (p...) :forward f :backward b)` | `torch.autograd.Function` (`forward`/`backward`) |
+
+> 🐍 Мир задачи в Qualisp — **снимок** (глобалы только для чтения, локальные копируются в задачу), а не общий heap: ближе к `multiprocessing`-модели, но в одном процессе и дешевле.

@@ -88,12 +88,12 @@ src/
 
 ## 19.4 S-выражения
 
-Тегированное объединение (`SExpr`, `src/core/sexpr.hpp`):
+Тегированное объединение (`SExpr`, `src/core/sexpr.hpp`); ячейка — 32 байта (`static_assert`):
 
 ```cpp
 class SExpr {
     Tag tag_;       // NIL, CONS, SYMBOL, FIXNUM, FLONUM, STRING,
-                    // PRIMITIVE, CLOSURE, INSTANCE, TENSOR, HLOPROG, JITPROG
+                    // FUNC, INSTANCE, TENSOR, HLOPROG
     union {         // tagged payload
         struct { SExpr *car_, *cdr_; } cons_;
         const Symbol *sym_;
@@ -101,19 +101,21 @@ class SExpr {
         double flonum_;
         struct { const char *data_; size_t len_; } string_;
         Tensor *tensor_;
-        struct { SExpr *params_, *body_, *env_; } closure_;
-        // HLOPROG: указатель на W^X-страницу (is_stencil) либо fallback-программа
-        // JITPROG: нативная RX-страница + master-замыкание + эпоха + счётчик вызовов
-        struct { void *fn_ptr; bool is_stencil; SExpr *closure_; uint64_t epoch_, calls_; } native_;
+        // FUNC (единый callable-атом): мастер-запись + выбрасываемый код-кэш
+        //   master_ — S-выражение: cons (params body . env) для лисп-функции,
+        //             символ имени для C-примитива (rc-поле)
+        //   code_   — C-fn либо RX-entry (нативная страница, claims по эпохе)
+        struct { void *code_; SExpr *master_; uint64_t packed_; } func_;
+        // HLOPROG: доля программы (storage, понижение, W^X-страница)
     };
 };
 ```
 
+**FUNC (единый callable-атом)** — лисп-замыкание, примитив на C и его нативная компиляция: одно значение, один путь вызова. Мастер-запись — S-выражение (инвариант одной формы действует и на callable), нативный код — выбрасываемый кэш поверх неё. Вкус (`is_c_func()`: мастер — атом, иначе лисп) и нативность (`is_jit_prog()`) — свойства того же атома; `type-of` возвращает `FUNCTION` для всех, печать — `#<function ...>`.
+
 Все cons-ячейки выделяются в `ConsCellPool`; объекты — в `Scope` с деструктор-трекингом.
 
-Замыкание: параметры + тело + захваченное окружение. Глобальные `defun`/`defmacro`/`defrule`
-сохраняются в `root_arena_` (stable) — код-как-данные живёт всю программу (гомоиконность
-рантайма).
+Функция: параметры + тело + захваченное окружение (мастер-запись cons `(params body . env)`). Глобальные `defun`/`defmacro`/`defrule` сохраняются в `root_arena_` (stable) — код-как-данные живёт всю программу (гомоиконность рантайма); клон лисп-функции шарит ячейки привязок — живое окружение остаётся живым.
 
 ## 19.5 Окружение и вычисление
 
@@ -143,7 +145,7 @@ struct EnvFrame {
 
 Из `sym_*` в `src/eval/interpreter.cpp`:
 
-`QUOTE, IF, PROGN, LAMBDA(\), LET, LET*, DEFUN, DEFUSE, DEFUSE!, DEFMACRO, MACROLET, DEFVAR, SETQ, COND, WHILE, AND, OR, BACKQUOTE, IMPORT, THE, GENSYM, MACROEXPAND, MACROEXPAND-1, FUNCALL, APPLY, DEFCLASS, MAKE-INSTANCE, SLOT-VALUE, DEFSTRUCT, DEFGENERIC, DEFMETHOD, MATCH, UNIFY, SUBST, AMB-LET, REQUIRE, AMB-COLLECT, ASSERT-FACT, RETRACT-FACT, DEFRULE, QUERY, RUN-RULES, DEFINE-COMPILER-MACRO, DEFHLOOP, NS-IF, NS-GRAD!, TENSOR` — и **80+ примитивов** (арифметика, тензоры, autograd, HLO, FFI, IO, data).
+`QUOTE, IF, PROGN, LAMBDA(\), LET, LET*, DEFUN, DEFUSE, DEFUSE!, DEFMACRO, MACROLET, DEFVAR, SETQ, COND, WHILE, AND, OR, BACKQUOTE, IMPORT, THE, GENSYM, MACROEXPAND, MACROEXPAND-1, FUNCALL, APPLY, DEFCLASS, MAKE-INSTANCE, SLOT-VALUE, DEFSTRUCT, DEFGENERIC, DEFMETHOD, MATCH, UNIFY, SUBST, AMB-LET, REQUIRE, AMB-COLLECT, ASSERT-FACT, RETRACT-FACT, DEFRULE, QUERY, RUN-RULES, DEFINE-COMPILER-MACRO, DEFHLOOP, NS-IF, NS-GRAD!, TENSOR, FUTURE, PMAP` — и **80+ примитивов** (арифметика, тензоры, autograd, HLO, FFI, IO, data). Макрос `deftape!` (определение дифференцируемой функции, гл. 7.8) живёт в stdlib (`stdlib/ml.qlsp`) поверх примитива регистрации.
 
 ## 19.7 Тензорная подсистема
 
@@ -254,6 +256,13 @@ class GradientTape {  // thread_local singleton
   `TRACE-DUMP`, `TRACE-CLEAR`, переменная окружения `QUALISP_TRACE`. Трейс отвечает на
   вопрос «как сюда пришли», тогда как `(mem-report)` — «что стало» (гл. 5). Выключенный
   трейс стоит один relaxed load, сам буфер не течёт.
+- **Асинхронный слой.** Пул воркеров с интерпретатором на каждом воркере, future'ы и
+  каналы (`FUTURE`/`AWAIT`/`CHAN` — спец-формы, `stdlib/async.qlsp` — форма интерфейса).
+  Мир задачи — снимок: глобалы общие и только для чтения, локальные переменные вызывающего
+  копируются в задачу; форма задачи — копия future. Пул по умолчанию последовательный
+  (один воркер); `QUALISP_THREADS` поднимает число воркеров на риск оператора (гонка при
+  трёх и более). Многоядерность программы живёт в тензорных кёрнелах (OpenMP + OpenBLAS);
+  подробности и контракт — гл. 15.12.
 
 ## 19.9 HLO-пайплайн
 
@@ -351,11 +360,18 @@ OPT)`. `GRAPH-DATA` отдаёт копию формы и **не строит п
   сравнения с двумя числовыми аргументами; всё остальное — `lookup_var` + `call_value`,
   поэтому рекурсия jit-to-jit работает.
 - **Bail-блок**: несовпадение типа или неизвестная ситуация → возврат bail-токена →
-  интерпретатор повторяет тело по master-копии (transaction-retry). Хук — `Interpreter::apply`
-  (case `JITPROG`).
+  интерпретатор повторяет тело по master-копии (transaction-retry). Хук — `Interpreter::apply`.
+- **Жизнь страницы: рефкаунт обёрток.** Страница живёт, пока жив хотя бы один исполняющий
+  её обёртка; реестр страниц ключует претензии (claims) эпохой рождения страницы, поэтому
+  отпускание устаревшей обёртки после `DISCARD-JIT` — no-op, а не сброс чужой претензии.
+  Смерть последней обёртки освобождает страницу и снимает её кэш-записи. Клон функции
+  делит страницу и берёт свою претензию; `jit-pages` в `(mem-report)` — живые страницы.
 - **Эпоха и heal**: любое `defmacro`/`define-compiler-macro` → `jit::invalidate_all()` (все
   страницы сбрасываются); stale-обёртка пересобирается после 64 интерпретируемых вызовов,
   засевая решётку типов наблюдаемой сигнатурой (`JIT-SIG`).
+- **Сериализация компиляции между потоками**: страница публикуется в общий список и общий
+  кэш, поэтому компиляция под асинхронным слоем берёт блокировку один раз на
+  компилируемую функцию (рекурсивно — компиляция может компилировать вызываемое).
 - **Только SysV x86-64** — стенсилы выписаны руками под эту ABI.
 
 ## 19.10 Neuro-Symbolic Router
@@ -452,18 +468,20 @@ DOT) — CI зелёный на Linux и Windows.
 | Параметр | Значение |
 |---|---|
 | Блок scratch-Scope | 16 МБ (`DEFAULT_BLOCK_SIZE`) |
-| ConsCellPool | предвыделенный, фиксированный размер ячейки; `acquire`/`free` — O(1) |
+| ConsCellPool | предвыделенный, блоки по 1M ячеек фиксированного размера; `acquire`/`free` — O(1) |
 | Guard глубины | 10 000 eval-кадров; ловимая ошибка + `(EVAL-MAX-DEPTH n)`; RAII-декремент, eval жив после catch |
 | Кольцо DEBUG-TRACE | 4096 записей; категории `scope`/`clone`/`expand`/`macro`; выключено по умолчанию |
 | rc-контракт | `refs_` в стабильной ячейке (rc=1 при создании, `nil` бессмертен); `QUALISP_RC_POISON=1` — QA-хук против use-after-release |
 | LSan-гейт | ASan c `detect_leaks=1` + `ulimit -s unlimited`, рецепт `tools/asan_gate.sh`; гейт собирает **все** падения за прогон и падает в конце, а не на первом файле |
 | Владение | структура — RC (`stable_ref`/`stable_release`, каскад worklist, шарится); тензорные буферы — без RC: один владелец, точный размер, `TensorBufferPool` |
-| TensorBufferPool | exact-size, кэш по (shape, dtype), при переполнении лимита буферы уходят системе |
+| TensorBufferPool | exact-size, кэш по (shape, dtype); буфер уходит системе, если пул превышает лимит (1 GiB) |
+| Страницы JIT | реестр с претензиями (claims), ключованными эпохой рождения страницы; смерть последней обёртки освобождает страницу; `jit-pages` в `(mem-report)` |
+| Асинхронный слой | пул воркеров, по умолчанию один воркер; `QUALISP_THREADS=N` поднимает до N+1 потоков (с потоком программы) — при 3+ воркерах риск гонки, см. гл. 15.12 |
 | SIMD (AVX2/FMA) | 8×f32 = 256 бит |
 | SIMD (NEON) | 4×f32 = 128 бит |
 | Кэш HLO | in-process fingerprint (версия эмиттера + shape-ключ + dtype) |
 | Порог heal JIT | 64 интерпретируемых вызова (`k_hot_calls`, гл. 20) |
-| Модули stdlib вшито | 13 (core string dl ns ml io regex audio datetime pkg errors visual tablet) |
+| Модули stdlib вшито | 14 (core string dl ns ml io regex audio datetime pkg errors visual tablet async) |
 | `dl` | слои-как-данные; `linear`/`net-forward`/`train-step`/`train-epochs` |
 | Автодополнения LSP | ~140 (`lsp_tables.inc`) |
 | Стенсилы JIT | SysV x86-64 |
@@ -508,10 +526,12 @@ DOT) — CI зелёный на Linux и Windows.
 - **`run-tests` освобождает реестр в конце**: повторный вызов в том же скрипте даёт `0/0
   passed`.
 - **JIT-стенсилы** — только SysV x86-64; покрытое подмножество форм невелико;
-  `MACROLET`-тела не компилируются; bail = повтор тела интерпретатором (transaction-retry,
-  гл. 20.7). Есть разобранный, но не устранённый случай: ошибка во вложенном вызове внутри
-  JIT-обёртки роняет тест под ASan (в release проходит) — причина в цепочке освобождения
-  master-копии, нужен отдельный разбор.
+  `MACROLET`-тела не компилируются; `&rest`, `&optional` и точечный хвост параметров не
+  компилируются (такие функции остаются интерпретируемыми — поведение идентично по
+  построению); bail = повтор тела интерпретатором (transaction-retry, гл. 20.7).
+- **Асинхронный слой: при трёх и более воркерах возможна порча значения** в задачах с циклом
+  по переменной `let` — кросс-поточная гонка в общем состоянии интерпретатора не локализована.
+  Пул по умолчанию последовательный; `QUALISP_THREADS` — на риск оператора (гл. 15.12).
 - **EnvFrame** — SExpr-alist; переработка окружения (self-hosting) — направление развития.
 - **Произвольное переписывание графа** (`graph-node`/`graph-rewrite`) не поддерживается; база
   есть: `GRAPH-DATA`/`GRAPH-FROM-DATA`/`GRAPH-RUN-PASSES`.
@@ -525,13 +545,15 @@ DOT) — CI зелёный на Linux и Windows.
 
 Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21
 (образы), гл. 22 (Tablet). Тесты — сюиты в `tests/` (плюс фазовые в `test/`): `jit.qlsp`,
-`image.qlsp`, `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `hlo_graph_data.qlsp`,
-`hlo_form_canary.qlsp`, `f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`,
-`memory_setq.qlsp`, `loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`,
-`expansion_cache.qlsp`, `debug_trace.qlsp`, `tail_call.qlsp`, `rc_contract.qlsp`,
-`rc_escape.qlsp`, `arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`, `tref.qlsp`,
-`print_arity.qlsp`, `math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`,
-`ns_router_hlo.qlsp`, `homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит
-`production_training.qlsp` (CSV-датасеты из `tests/data/`: классификация и регрессия,
-HLO-депл с проверкой против интерпретатора, плоская память по эпохам, round-trip образа и
-весов). Проверочный контур памяти — гл. 5.5: poison-гейт, ASan-гейт и `(mem-report)`.
+`jit_page_lifetime.qlsp`, `func_atom.qlsp`, `tape_fn.qlsp`, `async.qlsp`, `image.qlsp`,
+`hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `hlo_graph_data.qlsp`, `hlo_form_canary.qlsp`,
+`f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`, `memory_setq.qlsp`,
+`loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`, `expansion_cache.qlsp`,
+`debug_trace.qlsp`, `tail_call.qlsp`, `rc_contract.qlsp`, `rc_escape.qlsp`,
+`arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`, `tref.qlsp`, `print_arity.qlsp`,
+`math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`, `ns_router_hlo.qlsp`,
+`homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит `production_training.qlsp`
+(CSV-датасеты из `tests/data/`: классификация и регрессия, HLO-депл с проверкой против
+интерпретатора, плоская память по эпохам, round-trip образа и весов). Проверочный контур
+памяти — гл. 5.5: poison-гейт, ASan-гейт и `(mem-report)`; гейт асинхронного слоя и
+занятости ядер — `tools/async_gate.sh`.

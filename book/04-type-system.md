@@ -111,13 +111,13 @@ Qualisp — язык с **постепенной типизацией** (gradual
 | `'sym` | `SYMBOL` | (нет аналога) |
 | `(1 2 3)` | `LIST` | `list` |
 | `(tensor ((1.0)))` | `TENSOR` | `numpy.ndarray` / `torch.Tensor` |
-| `(lambda (x) x)` / `(defun ...)` | `FUNCTION` | `function` |
+| `(lambda (x) x)` / `(defun ...)` / примитив / JIT-обёртка | `FUNCTION` | `function` |
 | `#(1 2 3)` вектор | `VECTOR` | (нет аналога) |
 | `nil` | `NIL` | `NoneType` |
 
 > 🐍 В Python имена типов в lowercase, в Qualisp — uppercase. Это согласовано с конвенцией intern-символов (`T+`, `MATMUL!` и т.д.).
 
-Cons-ячейки сообщаются как `LIST`. Это упрощает DSL-валидацию и проверки типов: `(if (equal (type-of x) 'LIST) ...)`.
+Cons-ячейки сообщаются как `LIST`. Это упрощает DSL-валидацию и проверки типов: `(if (equal (type-of x) 'LIST) ...)`. Единый callable-атом (`FUNC`) отдаёт `FUNCTION` для всех трёх вкусов — лисп-замыкания, C-примитива и его нативной компиляции (гл. 3.2).
 
 ## 4.8 Известные ограничения
 

@@ -5,7 +5,7 @@
 ### Готовый бинарник (Linux)
 
 ```bash
-curl -L https://github.com/FQingLars/Qualisp-Project/releases/download/v2.9.0/qualisp-linux-x86_64 -o qualisp
+curl -L https://github.com/FQingLars/Qualisp-Project/releases/download/v2.9.3/qualisp-linux-x86_64 -o qualisp
 chmod +x qualisp && mv qualisp ~/.local/bin/
 ```
 
@@ -56,7 +56,7 @@ Enter expressions, press Ctrl+D to exit.
 => 16.0
 ```
 
-REPL при старте **автоматически загружает все 13 модулей стандартной библиотеки** (см. `embedded_modules[]` в `src/main.cpp`): `core`, `string`, `dl`, `ns`, `ml`, `io`, `regex`, `audio`, `datetime`, `pkg`, `errors`, `visual`, `tablet` (гл. 22). Они вшиты в бинарник через `cmake/stdlib_embed.cmake` (на этапе сборки `.qlsp` превращаются в `.h` через `cmake/gen_stdlib_header.cmake` и компилируются в бинарник). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
+REPL при старте **автоматически загружает все 14 модулей стандартной библиотеки** (см. `embedded_modules[]` в `src/main.cpp`): `core`, `string`, `dl`, `ns`, `ml`, `io`, `regex`, `audio`, `datetime`, `pkg`, `errors`, `visual`, `tablet` (гл. 22), `async` (гл. 15.12). Они вшиты в бинарник через `cmake/stdlib_embed.cmake` (на этапе сборки `.qlsp` превращаются в `.h` через `cmake/gen_stdlib_header.cmake` и компилируются в бинарник). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`.
 
 > 🐍 **Python-аналогия.** Это как если бы `python` стартовал с предимпортированными `numpy`, `torch`, `sklearn`, `re`, `datetime`, `time`, `urllib`, `tensorboard`, `str`.
 
