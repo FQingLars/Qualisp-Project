@@ -43,9 +43,21 @@
 | `; комментарий` | `# комментарий` |
 | `'(1 2 3)` | `[1, 2, 3]` (литерал) |
 | `(= a b)` | `a == b` — числа сравниваются **по значению**: `(= 0 0.0)` → `t` |
-| `(equal a b)` | `a == b` (cons/строки/символы — структурно; замыкания, HLO/JIT-программы, инстансы, тензоры — по идентичности, как `a is b`) |
+| `(equal a b)` | `a == b` (cons/строки/символы — структурно; замыкания, HLO/JIT-программы, структуры, тензоры — по идентичности, как `a is b`) |
 | `(print (strcat "x " (to-string 42)))` | `print("x", 42)` — `print`/`display` принимают **ровно один аргумент** |
 | `(type-of x)` | `type(x).__name__` (в Qualisp — uppercase) |
+
+## 18.1.1 Структуры, методы и трейты
+
+| Qualisp | Python |
+|---|---|
+| `(defstruct pt (x y))` / `(pt 1 2)` | `@dataclass` / `class pt: ...` + `pt(1, 2)` — конструктор-функция |
+| `(slot-value p 'x)` / `(set-slot p 'x v)` | `p.x` / `p.x = v` — чтение и запись поля |
+| `(defstruct p (x: byte y: i64))` | типизированные поля: `byte` (raw 0..255), `i16`/`u16`/`i32`/`u32`/`i64`/`u64`/`f32`/`f64`, `ptr` — как ctypes-раскладка |
+| `(type-of p)` → `STRUCT` | `type(p).__name__` |
+| `(IMPL name (defun m (self) ...))` | методы класса: `def m(self): ...` |
+| `(m obj)` — например `(len2 (v2 3 4))` | `obj.m()` — диспетч по первому аргументу |
+| `(TRAIT name (sig ...))` + `(trait-complete-p 'S 'T)` | `typing.Protocol` + проверка полноты реализации |
 
 ## 18.2 Списки
 
@@ -241,7 +253,13 @@
 | Qualisp | Python-мир |
 |---|---|
 | `(ffi-load "lib.so")` | `ctypes.CDLL("lib.so")` |
-| `(ffi-call "sin" "float" 0.0)` | `lib.sin(0.0)` |
+| `(FFI-DEFUN "pow" c-pow "f64" (x: f64 y: f64))` | `ctypes.CFUNCTYPE`: C-имя, лисп-имя, возврат, аргументы — строгие типы в обе стороны |
+| `(c-pow 2.0 3.0)` | `pow(2.0, 3.0)` — вызов как обычной функции (работает и из JIT-кода) |
+| `(FFI-DEFSTRUCT fs (a: byte b: f64))` | `class fs(ctypes.Structure): _fields_ = [...]` — C-layout: выравнивание и padding как в C |
+| `(FFI-ADDR st 'field)` | `ctypes.byref(st.field)` — адрес блока или поля (для out-параметров) |
+| `(FFI-OFFSET 'fs 'b)` | `fs.b.offset` → 8 (byte-смещение поля) |
+| `(FFI-SIZE 'fs)` | `ctypes.sizeof(fs)` → 16 |
+| `(ffi-call "sin" "float" 0.0)` | `lib.sin(0.0)` — динамический путь |
 | `(ffi-call "atan2" "float" 1.0 1.0)` | `lib.atan2(1.0, 1.0)` |
 | `(ffi-call "strlen" "int" "hello")` | `lib.strlen(b"hello")` |
 | `(ffi-import "libfoo.so" 'fn)` | `cdll.libfoo.fn` |
@@ -260,3 +278,12 @@
 | `(deftape! name (p...) :forward f :backward b)` | `torch.autograd.Function` (`forward`/`backward`) |
 
 > 🐍 Мир задачи в Qualisp — **снимок** (глобалы только для чтения, локальные копируются в задачу), а не общий heap: ближе к `multiprocessing`-модели, но в одном процессе и дешевле.
+
+## 18.12 Ошибки
+
+| Qualisp | Python |
+|---|---|
+| `(catch-error f)` | `try/except` — успех: пара `(T . результат)`, ошибка: структура |
+| `(error-message e)` | `str(e)` — текст ошибки |
+| `(error-cause e)` | `e.__cause__` — ошибка, пойманная под ней (у корневой — `nil`) |
+| `(error-traceback e)` | `traceback.extract_tb(e.__traceback__)` — список кадров-структур (`name`/`file`/`line`/`form`) |

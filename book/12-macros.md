@@ -118,7 +118,7 @@ Splice `,@` разворачивает список в место, где сто
 ```lisp
 (import ERRORS)
 (try (risky-operation)
-  (e (print (error-msg e))))
+  (e (print (error-message e))))
 ```
 
 Из `stdlib/errors.qlsp`:
@@ -127,19 +127,22 @@ Splice `,@` разворачивает список в место, где сто
 (defmacro try (body catch-clause)
   (let ((err-sym (gensym "e")))
     `(let ((,err-sym (catch-error (lambda () ,body))))
-       (if ,err-sym
+       (if (car ,err-sym)
+         (cdr ,err-sym)
          (let ((,(car catch-clause) ,err-sym))
-           ,@(cdr catch-clause))
-         nil))))
+           ,@(cdr catch-clause))))))
 ```
 
-Раскрытие: тело оборачивается в лямбду и вызывается через `catch-error`; если возвращается ошибка, переменная из `catch-clause` (здесь `e`) связывается с ней.
+Раскрытие: тело оборачивается в лямбду и вызывается через `catch-error`. При успехе `try` возвращает **значение тела** (`cdr` пары успеха); при ошибке переменная из `catch-clause` (здесь `e`) связывается со **структурой ошибки** — поля читаются методами `error-message`/`error-cause`/`error-traceback`.
 
-`CATCH-ERROR` — **настоящий примитив**: возвращает `((T result) | (NIL "message"))`, и stdlib-`try` сохраняет результат тела, а не только обрабатывает ошибку:
+`CATCH-ERROR` — настоящий примитив: успех — пара `(T . результат)`, ошибка — структура от трейта `ERROR` (у неё `car` → `nil`, поэтому проверка `(car res)` отличает их). Пойманная ошибка дополнительно печатает свою цепочку `cause` от корня до листа:
 
 ```lisp
 (let ((res (catch-error (lambda () (* 6 7)))))
-  res)          ;; → (T 42) — результат сохранён
+  (car res))                    ;; → T — успех; (cdr res) → 42
+
+(error-message (catch-error (lambda () (throw "boom"))))
+;; → "boom" — текст из структуры ошибки
 ```
 
 ## 12.7 Compiler macros: оптимизационные макросы

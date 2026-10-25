@@ -90,7 +90,7 @@ Hello, Qualisp!
 (import AUDIO)     ;; FFT, STFT, окна, mel-шкала, hz-to-mel
 (import DATETIME)  ;; время: now-ts, now-iso-str, sleep, elapsed
 (import PKG)       ;; пакетный менеджер: pkg-install из GitHub
-(import ERRORS)    ;; ошибки: make-error, throw, assert, try
+(import ERRORS)    ;; ошибки: throw, assert, try, error-message/error-cause/error-traceback
 (import VISUAL)    ;; дашборд метрик (TensorBoard-подобный HTTP)
 ```
 

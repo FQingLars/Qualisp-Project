@@ -183,7 +183,7 @@ RC к тензорным буферам не применяется сознат
 
 Правило: **структурное поле само берёт ссылку** на значение, которое в него кладут.
 Это касается и cons-пары, и захвата замыкания, и записи в реестр (plist, слоты
-инстансов, реестры fusion), и back-ref'ов декодера образов.
+структур, реестры fusion), и back-ref'ов декодера образов.
 
 Следствие — в коде нет компенсирующих обходов: ни «обхода структуры с добиранием
 ссылок», ни отдельного аудита «все ли места взяли ссылку». Место, где значение
@@ -253,9 +253,9 @@ RC-контракта, worklist-каскада и счётчиков `(mem-repor
 ```lisp
 (print (mem-report))
 ;; → (("names" . 0) ("payloads" . 0) ("progs" . 0) ("tensors" . 0)
-;;     ("shared" . 0) ("stable-bytes" . 125392) ("scratch-bytes" . 3922)
-;;     ("scratch-cells" . 25814) ("stable-cells" . 26629)
-;;     ("stable-cells-released" . 23649) ("cells-acquired" . 76092)
+;;     ("shared" . 0) ("stable-bytes" . 124912) ("scratch-bytes" . 3922)
+;;     ("scratch-cells" . 26003) ("stable-cells" . 26850)
+;;     ("stable-cells-released" . 23775) ("cells-acquired" . 76628)
 ;;     ("cell-pool-cells" . 65536) ("immortal-cells" . 1) ("jit-observations" . 0)
 ;;     ("jit-pages" . 0) ("buffers-released" . 0) ("progs-released" . 0))
 ```
