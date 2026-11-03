@@ -40,7 +40,9 @@ src/
 ├── core/          Scope (HibLin), SExpr, Symbol, ConsCellPool, TensorBufferPool, StableMemory,
 │                  simd.hpp (slab-ядра), trace.{hpp,cpp} (хронология владения), image.{hpp,cpp} (образы, гл. 21)
 ├── reader/        CharStream, Readtable
-├── eval/          Interpreter (80+ примитивов), специальные формы, символьный движок
+├── eval/          Interpreter, специальные формы, символьный движок
+├── prim/          примитивы: единая prim-таблица (80+: арифметика, тензоры, autograd, HLO, FFI, IO, data)
+├── runtime/       рантайм-поддержка исполнения
 ├── types/         Type, TypeChecker (постепенная типизация)
 ├── macros/        MacroExpander, backquote
 ├── mop/           StructDef, StructRegistry, Struct, TraitDef, TraitRegistry (структуры и трейты)
@@ -52,7 +54,8 @@ src/
 ├── symbolic/      S1-S8 (match, unify, plist, defrule, amb, compiler-macros, defhloop)
 ├── ns/            RouteHop, Router, GuiltDetector (S9)
 ├── data/          foundation, qserde (.qsrd-сериализация)
-├── ffi/           FFI-LOAD/CALL/IMPORT (dlopen + dlsym)
+├── embed/         Embedding C API: библиотека `qualisp-core` (заголовок `qualisp.h`) — C зовёт Lisp (гл. 16)
+├── ffi/           FFI-LOAD/FFI-DEFUN/FFI-DEFSTRUCT/FFI-IMPORT (dlopen + dlsym)
 ├── visual/        Dashboard (HTTP, TensorBoard-подобный)
 ├── bindings/      bind.hpp, stb_image.cpp (нативные хелперы биндингов)
 ├── qvalent/       qvalent CLI (пакетный менеджер)
@@ -106,8 +109,8 @@ class SExpr {
         //             символ имени для C-примитива (rc-поле)
         //   code_   — C-fn либо RX-entry (нативная страница, claims по эпохе)
         struct { void *code_; SExpr *master_; uint64_t packed_; } func_;
-        // STRUCT: дескриптор StructDef + массив слотов (malloc для stable,
-        //         блок арены для scratch; каскад смерти освобождает массив)
+        // STRUCT: дескриптор StructDef + массив слотов (всегда malloc,
+        //         owned-ячейкой; каскад смерти освобождает массив)
         // HLOPROG: доля программы (storage, понижение, W^X-страница)
     };
 };
@@ -115,7 +118,7 @@ class SExpr {
 
 **FUNC (единый callable-атом)** — лисп-замыкание, примитив на C и его нативная компиляция: одно значение, один путь вызова. Мастер-запись — S-выражение (инвариант одной формы действует и на callable), нативный код — выбрасываемый кэш поверх неё. Вкус (`is_c_func()`: мастер — атом, иначе лисп) и нативность (`is_jit_prog()`) — свойства того же атома; `type-of` возвращает `FUNCTION` для всех, печать — `#<function ...>`.
 
-**STRUCT** — структура с фиксированным layout: прямой указатель на дескриптор `StructDef` (число и имена полей, таблица методов) и массив слотов. Массив слотов — malloc для stable-структур, блок арены для scratch; каскад смерти освобождает массив и отдаёт rc-ссылки значений (гл. 5, 13). Печать — `#<struct ...>`, `type-of` — `STRUCT`.
+**STRUCT** — структура с фиксированным layout: прямой указатель на дескриптор `StructDef` (число и имена полей, таблица методов) и массив слотов. Массив слотов — всегда `malloc`, он owned-ячейкой; каскад смерти освобождает массив и отдаёт rc-ссылки значений (гл. 5, 13). `SET-SLOT` промоутит значение — оно живёт по правилам хранилища (§5.5.5). Печать — `#<struct ...>`, `type-of` — `STRUCT`.
 
 Все cons-ячейки выделяются в `ConsCellPool`; объекты — в `Scope` с деструктор-трекингом.
 
@@ -216,6 +219,8 @@ Tensor: dtype (F16/F32/F64/I32/I64/U8), shape, strides, numel,
         requires_grad, grad, grad_node (лента), m/v/step (Adam)
 ```
 
+- Тензор — **одно выделение [заголовок | данные]** с единственным разрушителем: payload
+  принадлежит объекту и переживает откат региона независимо от ячеек (§5.5.6).
 - Поэлементные операции — SIMD: AVX2 (8×f32) на x86_64, NEON (4×f32) на ARM. Ядра
   работают по сырым указателям (`src/core/simd.hpp`: `sum_ps`/`max_ps`/`scale_ps`/`exp_ps`
   с полиномом AVX2), диспетчеризация идёт по layout, одометр работает без аллокаций.
@@ -454,9 +459,10 @@ OPT)`. `GRAPH-DATA` отдаёт копию формы и **не строит п
 - `Router` — упорядоченные хопы от корня к листу с depth-трекингом.
 - `GuiltDetector::detect(router, labels)` → `GuiltVerdict { kind, guilty_hop, per_sample_hop,
   per_sample_kind }`.
-- `NS-IF` (`do_ns_if`) выбирает ветвь per-sample по argmax, записывает хоп, исполняет ветвь
-  первого образца (для чистого батча; для смешанного — маршрут/guilt per-sample, но
-  исполнение одно).
+- `NS-IF` (`do_ns_if`) выбирает ветвь per-sample по argmax и записывает хоп; смешанный батч
+  исполняется по-настоящему: каждый уникальный взятый вариант ветви — на полном батче,
+  результат собирается построчно (строка `s` — из ветви `taken[s]`), градиент строки уходит
+  только в свою ветвь.
 - `NS-GRAD!` (`do_ns_grad`) блокирует tape-узлы виновных ветвей, добавляет
   softmax-weighted STE в `decision_logits->grad`.
 - Роутер работает и поверх макро-слотов (`ns-route`/`ns-route-sample`/`ns-route-index`):
@@ -540,9 +546,10 @@ DOT) — CI зелёный на Linux и Windows.
 | ConsCellPool | предвыделенный, блоки по 1M ячеек фиксированного размера; `acquire`/`free` — O(1) |
 | Guard глубины | 10 000 eval-кадров; ловимая ошибка + `(EVAL-MAX-DEPTH n)`; RAII-декремент, eval жив после catch |
 | Кольцо DEBUG-TRACE | 4096 записей; категории `scope`/`clone`/`expand`/`macro`; выключено по умолчанию |
-| rc-контракт | `refs_` в стабильной ячейке (rc=1 при создании, `nil` бессмертен); `QUALISP_RC_POISON=1` — QA-хук против use-after-release |
+| rc-контракт | `refs_` живёт только в stable-ячейке (birth-единица при создании; маркер мёртвой ячейки — `refs_ == 0`; `nil` бессмертен); `QUALISP_RC_POISON=1` — яд против use-after-release |
 | LSan-гейт | ASan c `detect_leaks=1` + `ulimit -s unlimited`, рецепт `tools/asan_gate.sh`; гейт собирает **все** падения за прогон и падает в конце, а не на первом файле |
-| Владение | структура — RC (`stable_ref`/`stable_release`, каскад worklist, шарится); тензорные буферы — без RC: один владелец, точный размер, `TensorBufferPool` |
+| Диагностика памяти | `QUALISP_MEM_ROOTS=1` — обход живых корней и кольцо rc-событий; `POOL-DUP` — детектор двойного освобождения; `tools/poison_gate.sh` — crash-aware гейт яда (exit-код + маркер успеха + тексты нарушений) |
+| Владение | scope-дерево (откат = одна запись), скретч = стек (смерть только откатом), RC — только в stable (каскад worklist); правило корня: stable не держит скретч; конвенция передачи (birth-единица, `kHandedBit`); данные тензоров — без RC: один владелец, точный размер, `TensorBufferPool` |
 | TensorBufferPool | exact-size, кэш по (shape, dtype); буфер уходит системе, если пул превышает лимит (1 GiB) |
 | Страницы JIT | реестр с претензиями (claims), ключованными эпохой рождения страницы; смерть последней обёртки освобождает страницу; `jit-pages` в `(mem-report)` |
 | Асинхронный слой | пул воркеров, по умолчанию один воркер; `QUALISP_THREADS=N` поднимает до N+1 потоков (с потоком программы) — при 3+ воркерах риск гонки, см. гл. 15.12 |
@@ -550,7 +557,7 @@ DOT) — CI зелёный на Linux и Windows.
 | SIMD (NEON) | 4×f32 = 128 бит |
 | Кэш HLO | in-process fingerprint (версия эмиттера + shape-ключ + dtype) |
 | Порог heal JIT | 64 интерпретируемых вызова (`k_hot_calls`, гл. 20) |
-| Модули stdlib вшито | 14 (core string dl ns ml io regex audio datetime pkg errors visual tablet async) |
+| Модули stdlib вшито | 16 (core string ml dl ns io regex audio datetime pkg errors visual tablet async collections argparser) |
 | `dl` | слои-как-данные; `linear`/`net-forward`/`train-step`/`train-epochs` |
 | Автодополнения LSP | ~140 (`lsp_tables.inc`) |
 | Стенсилы JIT | SysV x86-64 |
@@ -559,8 +566,8 @@ DOT) — CI зелёный на Linux и Windows.
 | qvalent кэш | `$HOME/.cache/qualisp/<deployer>/<repo>/` |
 | QSRD v2 magic | `"QSRD"` (u16 ver) |
 | Tail-call | self-хвост пере-биндит кадр; гейт по живым tape-узлам; `let`/`let*` разворачиваются до 8 уровней |
-| Контракт CI | `run-tests` считает падения в `*test-failed*`; процесс возвращает 1 при любом упавшем сюите |
-| Тесты | сюит зелёный (Release, Linux); ASan-гейт с `detect_leaks=1` по всему корпусу; poison-гейт `QUALISP_RC_POISON=1` по всему корпусу; прод-датасеты `tests/data/*.csv` прогоняются продакшен-сценарием обучения |
+| Контракт CI | `run-tests` считает падения в `*test-failed*` (упавший assert проваливает тест); процесс возвращает 1 при любом упавшем сюите; сводка печатает счётчики |
+| Тесты | 150 сюит, зелёный (Release, Linux); ASan-гейт с `detect_leaks=1` по всему корпусу; poison-гейт `QUALISP_RC_POISON=1` по всему корпусу; прод-датасеты `tests/data/*.csv` прогоняются продакшен-сценарием обучения |
 
 ## 19.14 Известные ограничения
 
@@ -580,9 +587,9 @@ DOT) — CI зелёный на Linux и Windows.
 - **`let` под биндингом с 1- или 2-байтным dtype теряет свои биндинги** (F16, U8; на F32 не
   воспроизводится). Практический обход: такие тензоры связывать через `defvar`, вложенный
   `let` под ними не ставить.
-- **Per-value RC для scratch-ячеек не завершён**: счётчик у scratch-ячеек есть, но полноценное
-  владение ими на границе жизни scratch-значений — впереди (оптовый возврат scope не умеет
-  освобождать поячеечно).
+- **Смерть scratch-ячеек — только откатом scope'а**: пер-ячеечного free в скретче нет — это
+  модель, а не упущение (§5.5.2). Лента autograd и бектрейс живут по своим каналам (сырые
+  `Tensor*`, копии форм) и правилом корня не покрываются автоматически (§5.5.10).
 - **Хвостовой перебиндинг TCO делит под RC только уже стабильные параметры**; scratch-параметры
   и горячий ML-путь копируются. Нужна смена конвенции возврата — это изменение всей цепочки
   eval, поэтому вопрос остаётся открытым.
@@ -597,8 +604,11 @@ DOT) — CI зелёный на Linux и Windows.
 - **JIT-стенсилы** — только SysV x86-64; покрытое подмножество форм невелико;
   `MACROLET`-тела не компилируются; bail = повтор тела интерпретатором (transaction-retry,
   гл. 20.7).
-- **Колбэков C→Lisp нет**: FFI односторонний — Lisp вызывает C, обратного трамплина не
-  существует (гл. 16).
+- **`DISCARD-JIT` из jitted-кода снимает страницу под собой** — известная шероховатость
+  (гл. 20).
+- **Колбэков C→Lisp во FFI нет**: FFI односторонний — Lisp вызывает C, обратного трамплина не
+  существует; в Embedding C API есть `qualisp_register_prim` — C-функция регистрируется как
+  примитив Lisp (гл. 16).
 - **Trait-объекты отложены**: трейт — контракт (набор методов с именами и арностями),
   динамического dispatch по vtable-trait нет; диспетч метода идёт по первому аргументу.
 - **Бектрейс из JIT-кода несёт мастер-форму вызываемого**, а не исходную форму вызова:
@@ -617,19 +627,54 @@ DOT) — CI зелёный на Linux и Windows.
   (standalone) и `tests/` (`deftest`/`run-tests`); артефакты CI публикуются как релизные
   бинарники.
 
+## 19.15 Модель памяти (кратко)
+
+Полное описание — гл. 5.5; здесь — сводка механики, на которой держится рантайм.
+
+- **Три правила модели.** Дерево scope'ов = дерево вычислений: каждый вызов функции (и
+  loop-точки `while`/TCO) получает дочерний scope своего вызывающего, откат scope'а — одна
+  запись; scope — стековый RAII-объект, throw из глубины вызовов откатывает сам. Значение
+  живёт в scope'е своего хранилища: промежуточные данные умирают на конце своего scope'а,
+  результат и записываемое значение переезжают в scope хранилища (мосты: авто-клон
+  результата, promote при записи, промоут пары при захвате), def-формы пишут в stable всегда.
+  Побег региона — явное событие: регион переходит родителю (не откатывается), если результат
+  указывает в него ИЛИ в нём есть клетка с чужим владельцем; гистерезис — списко-образующая
+  рекурсия не откатывает регион (O(аллокаций), копий нет), мусорная — O(глубина).
+- **Скретч = стек.** Скретч-ячейки не несут счётчика, смерть — только откатом
+  (`scratch_death`); RC живёт только в stable (не-LIFO сроки: `defvar`/`defun`, веса,
+  программы, реестры). Живая unmanaged-ячейка несёт birth-единицу; маркер мёртвой ячейки —
+  `refs_ == 0`.
+- **Правило корня.** Stable-хранилище не держит скретч-ячейку — «ссылка не переживает свой
+  root» выполняется по построению. Захват замыканием = явный промоут пары биндинга в stable:
+  та же ячейка, ноль копий, значение общее (EQ-тождество). Правило записи: мир держателя
+  решает — запись в захваченный биндинг идёт в stable.
+- **Конвенция передачи владения.** Birth-единица ячейки передаётся первому держателю (метка
+  `kHandedBit`), перезапись поля освобождает старое значение, «разделение» — явный `hold` в
+  точке деления.
+- **Payload независим от ячеек.** Тензор — одно выделение [заголовок | данные] с единственным
+  разрушителем; struct-слоты и байты строк — всегда `malloc`.
+- **Наблюдаемость.** `(mem-report)` несёт ключи `vm-alloc-bytes`/`vm-free-bytes`/`vm-live-bytes`,
+  `scopes-born`/`scopes-died`, `scratch-cells`/`scratch-cells-released`/`scratch-cells-live`,
+  `graph-buffer`/`graph-bytes` и прежние реестры и счётчики (полный список — §5.5.9).
+  Диагностика: `QUALISP_MEM_ROOTS=1` — обход живых корней и кольцо rc-событий для охоты за
+  утечками; `POOL-DUP` — детектор двойного освобождения; `QUALISP_RC_POISON=1` и crash-aware
+  `tools/poison_gate.sh` — гейт яда.
+
 ---
 
 Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21
-(образы), гл. 22 (Tablet). Тесты — сюиты в `tests/` (плюс фазовые в `test/`): `jit.qlsp`,
+(образы), гл. 22 (Tablet). Тесты — 150 сюит в `tests/` (плюс фазовые в `test/`): `jit.qlsp`,
 `jit_page_lifetime.qlsp`, `func_atom.qlsp`, `tape_fn.qlsp`, `async.qlsp`, `image.qlsp`,
 `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `hlo_graph_data.qlsp`, `hlo_form_canary.qlsp`,
 `f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`, `memory_setq.qlsp`,
 `loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`, `expansion_cache.qlsp`,
 `debug_trace.qlsp`, `tail_call.qlsp`, `rc_contract.qlsp`, `rc_escape.qlsp`,
+`scope_tree.qlsp`, `b2_counters.qlsp`, `b3_regions.qlsp`, `adam_state.qlsp`,
 `arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`, `tref.qlsp`, `print_arity.qlsp`,
 `math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`, `ns_router_hlo.qlsp`,
 `homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит `production_training.qlsp`
 (CSV-датасеты из `tests/data/`: классификация и регрессия, HLO-депл с проверкой против
 интерпретатора, плоская память по эпохам, round-trip образа и весов). Проверочный контур
-памяти — гл. 5.5: poison-гейт, ASan-гейт и `(mem-report)`; гейт асинхронного слоя и
+памяти — гл. 5.5: poison-гейт (`tools/poison_gate.sh`), ASan-гейт, `POOL-DUP`,
+`QUALISP_MEM_ROOTS` и `(mem-report)`; гейт асинхронного слоя и
 занятости ядер — `tools/async_gate.sh`.

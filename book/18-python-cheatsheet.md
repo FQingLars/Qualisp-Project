@@ -17,6 +17,7 @@
 | `(boundp 'x)` | `'x' in globals()` |
 | `(jit f)` / `(setq f (jit f))` | CPython 3.13 JIT (copy-and-patch, тоже без IR в рантайме) — гл. 20 |
 | `(jit-sig f)` / `(jit-stale-p f)` | (нет аналога) — наблюдаемые типы параметров JIT |
+| `(jit-stats)` | (нет аналога) — алист учёта JIT: компиляции, попадания в кэш, интерпретированные вызовы по состояниям, именованные отказы компиляции |
 | `(save-image "w.qimg")` / `(load-image ...)` | `pickle(globals())` + `torch.save` в одном файле — гл. 21 |
 | `(discard-jit)` | (нет аналога) — сброс всех нативных страниц, поведение не меняется |
 | `(set-reader-macro '!' f)` | (нет аналога) |
@@ -44,6 +45,9 @@
 | `'(1 2 3)` | `[1, 2, 3]` (литерал) |
 | `(= a b)` | `a == b` — числа сравниваются **по значению**: `(= 0 0.0)` → `t` |
 | `(equal a b)` | `a == b` (cons/строки/символы — структурно; замыкания, HLO/JIT-программы, структуры, тензоры — по идентичности, как `a is b`) |
+| `(eq a b)` | `a is b` — идентичность символа (один интернированный `Symbol*`) |
+| `(EQ a b)` | `a is b` — идентичность объекта (тот же объект: замыкание, структура, тензор) |
+| `:linux`, `:avx2` (keyword-символы) | литералы, как `enum`-константы: самовычисляемы, `(equal :linux :linux)` → `t` |
 | `(print (strcat "x " (to-string 42)))` | `print("x", 42)` — `print`/`display` принимают **ровно один аргумент** |
 | `(type-of x)` | `type(x).__name__` (в Qualisp — uppercase) |
 
@@ -67,15 +71,34 @@
 | `(cons x xs)` | `[x] + xs` |
 | `(nth i xs)` | `xs[i]` |
 | `(length xs)` | `len(xs)` |
-| `(map f xs)` | `list(map(f, xs))` |
-| `(filter p xs)` | `list(filter(p, xs))` |
-| `(reduce + xs)` | `functools.reduce(op.add, xs)` |
+| `(map f xs)` / `(map f xs ys)` | `list(map(f, xs))` / `list(map(f, xs, ys))` — многолистовый, останавливается на корочайшем (модуль `collections`) |
+| `(filter p xs)` | `list(filter(p, xs))` (модуль `collections`) |
+| `(reduce fn xs init)` | `functools.reduce(fn, xs, init)` — но `(fn элемент аккумулятор)`: элемент первым (не порядок CL); без `init` первый элемент — аккумулятор, `nil`-init = без инициализатора |
 | `(zip-with f xs ys)` | `[f(a,b) for a,b in zip(xs,ys)]` |
 | `(member x xs)` | `x in xs` |
 | `(range 5)` | `range(5)` / `list(range(5))` |
 | `(take n xs)` / `(drop n xs)` | `xs[:n]` / `xs[n:]` |
 | `(reverse xs)` | `xs[::-1]` |
 | `(append xs ys)` | `xs + ys` |
+
+## 18.2.1 Коллекции: `dict`, `set`, `queue`, `heap` (модуль `collections`)
+
+| Qualisp | Python |
+|---|---|
+| `(dict)` / `(dict-put d k v)` / `(dict-get d k)` | `dict()` / `d[k] = v` / `d[k]` |
+| `(dict-get d k 'fallback)` | `d.get(k, fallback)` |
+| `(dict-has? d k)` / `(dict-del d k)` | `k in d` / `del d[k]` |
+| `(dict-keys d)` / `(dict-vals d)` / `(dict-size d)` | `list(d)` / `list(d.values())` / `len(d)` |
+| `(set)` / `(set-add s x)` / `(set-has? s x)` | `set()` / `s.add(x)` / `x in s` |
+| `(set-add-all s other)` / `(set-del s x)` | `s.update(other)` / `s.remove(x)` |
+| `(set-size s)` / `(set->list s)` | `len(s)` / `list(s)` |
+| `(queue)` / `(queue-push q x)` / `(queue-pop q)` | `deque()` / `q.append(x)` / `q.popleft()` |
+| `(queue-peek q)` / `(queue-empty? q)` / `(queue-size q)` | `q[0]` / `not q` / `len(q)` |
+| `(heap)` / `(heap-with less)` | `heapq` (min-куча) / куча со своей функцией порядка |
+| `(heap-push h x)` / `(heap-pop h)` / `(heap-peek h)` | `heappush(h, x)` / `heappop(h)` / `h[0]` |
+| `(heap-empty? h)` / `(heap-size h)` | `not h` / `len(h)` |
+
+Изменяемость — через поля struct (`set-slot`); ключи сравниваются через `equal`. Коллекции — обычные S-выражения, поэтому сериализуются без дополнительной работы. `queue` — амортизированно O(1) (front/rear), `heap` — skew-куча с `heap-merge` для слияния.
 
 ## 18.3 Тензоры (NumPy)
 
@@ -100,6 +123,7 @@
 | `(tref t i)` | `t.flatten()[i]` — один индекс = плоский номер элемента |
 | `(tref t i j)` | `t[i, j]` — N индексов = координаты ровно ранга N; выход за границы — ошибка |
 | `(tensor-item t i)` | `t.flatten()[i]` — элемент по индексу (индекс обязателен) |
+| `(tset! t i v)` | `t.flat[i] = v` — запись элемента на месте по плоскому индексу (float — любое число; целые — fixnum строго в диапазоне типа), возвращает `t` |
 | `(tensor->list t)` | `t.ravel().tolist()` |
 | `(FINITE? t)` | `np.isfinite(t).all()` — битовая проверка конечности (NaN/Inf) |
 | `(save-npy t "f.npy")` / `(load-npy "f.npy")` | `np.save` / `np.load` |
@@ -205,6 +229,8 @@
 | `(slot-set 'name form)` / `(eval-sandboxed form b)` | макро-слот + безопасный eval (нет аналога) |
 | `(ns-route logits slots)` | маршрутизация по макро-слотам (нет аналога) |
 | `(ns-train-coder! ...)` | RL-агент-кодер: 2-шаговый REINFORCE с baseline (нет аналога) |
+| `(ns-config :psi 4 :buffer 1048576)` | (нет аналога) — `:psi`: во сколько раз медленнее учится символьный слой; `:buffer`: бюджет пути графа в байтах |
+| `(:proves (row) body...)` в ветке `ns-if` | (нет аналога) — верификация ответа ветви: тело проверяется на строке ответа, `T` = доказано, `nil` = не доказано |
 
 ## 18.8 Строки, файлы, прочее
 
@@ -235,6 +261,21 @@
 
 > 🐍 `pickle` теряет dtype/shape тензоров (нужен отдельный `torch.save` + `np.save`). QSRD v2 хранит всё вместе: S-выражения, тензоры с dtype и шейпом (на **любой глубине** структуры), скаляры — в одном файле с magic `"QSRD"` и u16-версией.
 
+## 18.8.2 Аргументы командной строки: `argparser` + `command-line`
+
+| Qualisp | Python |
+|---|---|
+| `(command-line)` | `sys.argv` — список аргументов командной строки |
+| `(argparser :description "обучение")` | `argparse.ArgumentParser(description="обучение")` |
+| `(add-argument p "dataset")` | `add_argument("dataset")` — позиционный (обязателен по умолчанию) |
+| `(add-argument p "--epochs" :type :int :default 10)` | `add_argument("--epochs", type=int, default=10)` |
+| `(parse-args p (cdr (command-line)))` | `parser.parse_args()` |
+| `(arg-get parsed "epochs")` | `args.epochs` |
+| `(arg-get parsed "missing" 'fallback)` | `getattr(args, "missing", fallback)` |
+| `--help` генерируется автоматически | `argparse` help |
+
+Типы — `:str`/`:int`/`:float`/`:bool`; форма `--имя=значение` работает, флаг `:bool` без значения = `t`; имена в результате хранятся без ведущих дефисов (`--epochs` → `"epochs"`). Результат `parse-args` — алис значений.
+
 ## 18.9 Компиляция
 
 | Qualisp | Python-мир |
@@ -247,6 +288,9 @@
 | `(graph-run-passes prog '("cse" "dce" "fusion"))` | прогон оптимизационных проходов |
 | `(hlo-route-grad! prog labels)` | backward обучаемой ROUTE-ноды без ленты |
 | `(hlo-stencil-p h)` / `(hlo-has-range h)` | интроспекция скомпилированного кёрнела |
+| `(target)` | `sys.platform` / `platform.machine()` — дескриптор платформы (алис с `"os"`, `"arch"`, …) |
+| `(target-feature :avx2)` | проверка фичи платформы (детерминированная) |
+| `(cfg (:and :linux (:not :avx512)) form...)` | условная компиляция (`#ifdef`): несовпавшая ветка отсекается на раскрытии (фаза компиляции) и не выполняется; условия `:and`/`:or`/`:not` |
 
 ## 18.10 FFI
 
@@ -259,10 +303,24 @@
 | `(FFI-ADDR st 'field)` | `ctypes.byref(st.field)` — адрес блока или поля (для out-параметров) |
 | `(FFI-OFFSET 'fs 'b)` | `fs.b.offset` → 8 (byte-смещение поля) |
 | `(FFI-SIZE 'fs)` | `ctypes.sizeof(fs)` → 16 |
-| `(ffi-call "sin" "float" 0.0)` | `lib.sin(0.0)` — динамический путь |
-| `(ffi-call "atan2" "float" 1.0 1.0)` | `lib.atan2(1.0, 1.0)` |
-| `(ffi-call "strlen" "int" "hello")` | `lib.strlen(b"hello")` |
 | `(ffi-import "libfoo.so" 'fn)` | `cdll.libfoo.fn` |
+
+> ⚠️ Динамической цепочки `FFI-CALL` больше нет: рабочий путь FFI — `FFI-LOAD`, `FFI-DEFUN` (объявленные сигнатуры), `FFI-DEFSTRUCT`, `FFI-ADDR`/`FFI-OFFSET`/`FFI-SIZE`, `FFI-IMPORT`. Колбэков C→Lisp во FFI нет — для них есть `qualisp_register_prim` в embedding API.
+
+## 18.10.1 Embedding C API: `qualisp_*` (C зовёт Lisp)
+
+| Qualisp C API (гл. 16) | Python-аналог |
+|---|---|
+| `qualisp_open` / `qualisp_load_stdlib` / `qualisp_close` | жизненный цикл интерпретатора (встраивание, а не `ctypes`-вызов) |
+| `qualisp_eval` / `qualisp_call` | `eval(...)` / вызов функции из C |
+| `qualisp_nil` / `qualisp_int` / `qualisp_float` / `qualisp_string` / `qualisp_list` | конструкторы значений (как `ctypes`-обёртки) |
+| `qualisp_is_int/float/string/tensor/nil` / `qualisp_as_int/float/string` | `isinstance` / приведение (акессоры `ctypes`) |
+| `qualisp_tensor_wrap` / `qualisp_tensor_data` | borrowed-тензор над буфером хоста (`np.ctypeslib.as_array`) |
+| `qualisp_set_global` / `qualisp_get_global` | запись/чтение глобалов |
+| `qualisp_register_prim` | регистрация C-функции как примитива Lisp (Python C API: `PyCFunction`) |
+| `qualisp_error` | текст последней ошибки (C++-исключения не пересекают границу) |
+
+Маршалинг значений — зеркало FFI C: та же таможня, обратная сторона. Результаты `eval`/`call` клонируются в stable (scratch-арена формы умирает по её границе), значения хоста живут до `qualisp_close`.
 
 ## 18.11 Параллелизм и дифференцируемые функции
 
