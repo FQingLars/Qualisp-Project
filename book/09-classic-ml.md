@@ -22,6 +22,8 @@
 (majority-vote xs)              ;; → большинство (для ансамблей)
 ```
 
+`range`, `take`, `drop`, `zip-with` (и `map`/`filter` из `collections`) — итеративные обходы: глубина стека не зависит от длины списка, поэтому `(range 100000)` или `(map f xs)` над длинным списком не упираются в стек.
+
 ## 9.2 Ядра (kernels)
 
 Имена из `stdlib/ml.qlsp`:
@@ -64,6 +66,8 @@
 (minmax-scale-lst data)                 ;; [0,1]       MinMaxScaler
 ```
 
+NB: `standard-scale-lst` и `minmax-scale-lst` работают над **плоским списком чисел** (одна колонка): для матрицы применяйте их к нужной колонке, а не к списку строк.
+
 NB: `train-test-split` в `stdlib/ml.qlsp` принимает данные и таргеты **отдельными аргументами** (см. исходник):
 
 ```lisp
@@ -82,7 +86,7 @@ NB: `train-test-split` в `stdlib/ml.qlsp` принимает данные и т
 (defvar pred (knn-predict x train-data train-labels k))
 ```
 
-Реализация (`stdlib/ml.qlsp:108`): считает евклидовы расстояния до всех точек, сортирует индексы (`argsort` через insert-sort), возвращает топ-k голосов.
+Реализация (`stdlib/ml.qlsp:131`): считает евклидовы расстояния до всех точек, сортирует индексы (`argsort` через insert-sort), возвращает топ-k голосов.
 
 > 🐍 `KNeighborsClassifier(n_neighbors=k).fit(...).predict([x])`.
 
@@ -118,7 +122,7 @@ NB: `train-test-split` в `stdlib/ml.qlsp` принимает данные и т
 
 > 🐍 `RandomForestClassifier(n_estimators=n_trees, max_depth=...)`, `GradientBoostingClassifier(n_estimators=n, learning_rate=lr, max_depth=...)`.
 
-NB: порядок аргументов в `stdlib/ml.qlsp:234` — `(data labels n-trees max-depth)` и `(data labels n-estimators lr max-depth)`. В Python sklearn — те же имена.
+NB: порядок аргументов в `stdlib/ml.qlsp:257` — `(data labels n-trees max-depth)` и `(data labels n-estimators lr max-depth)`. В Python sklearn — те же имена. Градиентный бустинг работает с числовыми метками: остатки считаются как вещественные значения, поэтому `(gb-fit data labels ...)` на символьных классах не стартует — кодируйте цель числом.
 
 ## 9.9 K-Means
 
@@ -140,7 +144,7 @@ NB: порядок аргументов в `stdlib/ml.qlsp:234` — `(data label
 (defvar best (grid-search X y param-list fit-fn score-fn))
 ```
 
-`fit-fn` — функция вида `(lambda (tx ty) (lambda (x) (knn-predict x tx ty 3)))`.
+`fit-fn` — функция вида `(lambda (tx ty) (lambda (x) (majority-vote (knn-predict x tx ty 3))))`: `knn-predict` отдаёт список топ-k голосов, поэтому для метрики над одиночной меткой берём `majority-vote`.
 `score-fn` — `(lambda (preds y-true) (accuracy-score preds y-true))`.
 
 `grid-search` оценивает каждый вариант на всём `X`.
@@ -172,9 +176,9 @@ NB: порядок аргументов в `stdlib/ml.qlsp:234` — `(data label
                    (list 6.0 9.0) (list 1.2 0.6) (list 5.5 8.2)))
 (defvar labels (list 'a 'a 'b 'b 'a 'b))
 
-;; KNN с кросс-валидацией (k=3)
+;; KNN с кросс-валидацией (k=3); knn-predict отдаёт топ-3, берём большинство
 (defun fit-knn (tx ty)
-  (lambda (x) (knn-predict x tx ty 3)))
+  (lambda (x) (majority-vote (knn-predict x tx ty 3))))
 
 (defvar cv (cross-val-score data labels 3 fit-knn accuracy-score))
 (print cv)

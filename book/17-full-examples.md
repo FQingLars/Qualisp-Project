@@ -45,13 +45,12 @@
 
 ;; ----- компиляция инференса в HLO -----
 (defvar x-test (randn (list 10 1)))   ;; свежие тестовые данные
-(start-trace)
-(defvar dx (graph-param x-test))
-(defvar dw (graph-param w))
-(defvar db (graph-param b))
-(defvar dp (t+ (matmul dx dw) db))
-
-(defvar hlo (hlo-compile dp))
+(defvar hlo
+  (HLO-START (:psi 1)
+    (let ((dx (graph-param x-test))
+          (dw (graph-param w))
+          (db (graph-param b)))
+      (HLO-COMPILE (t+ (matmul dx dw) db)))))
 (defvar hlo-result (hlo-run hlo x-test w b))
 ```
 
@@ -65,7 +64,7 @@
 | `train-loop` | Рекурсия-цикл: forward, loss, backward, шаг SGD | `for i in range(200): loss.backward(); opt.step()` |
 | `(grad! loss)` | Backward по ленте | `loss.backward()` |
 | `(sgd-step w lr)` | Обновление весов на месте | `w -= lr * w.grad` |
-| `(start-trace)…(hlo-compile)` | Трассировка forward в граф и стенсил-компиляция | `compiled = torch.compile(lambda x: x @ w + b)` |
+| `(HLO-START … (HLO-COMPILE …))` | Трассировка forward в граф и стенсил-компиляция | `compiled = torch.compile(lambda x: x @ w + b)` |
 | `(hlo-run hlo ...)` | Нативный инференс | `compiled(x_test)` |
 
 Обратите внимание: тензоры-константы записываются как `(tensor ((2.0)))` — скаляр в форме `[1,1]`, чтобы избежать сюрпризов broadcasting'а.
@@ -107,14 +106,13 @@
 (train-epoch 1 500)
 
 ;; ----- HLO-компиляция инференса -----
-(start-trace)
-(defvar dx (graph-param X))
-(defvar w1p (graph-param w1))
-(defvar b1p (graph-param b1))
-(defvar w2p (graph-param w2))
-(defvar dh (relu (t+ (matmul dx w1p) b1p)))
-(defvar out (matmul dh w2p))
-(defvar hlo (hlo-compile out))
+(defvar hlo
+  (HLO-START (:psi 1)
+    (let ((dx (graph-param X))
+          (w1p (graph-param w1))
+          (b1p (graph-param b1))
+          (w2p (graph-param w2)))
+      (HLO-COMPILE (matmul (relu (t+ (matmul dx w1p) b1p)) w2p)))))
 (defvar hlo-pred (hlo-run hlo X w1 b1 w2))
 ```
 
@@ -160,6 +158,20 @@ for epoch in range(1, 501):
 3. Оберните `predict` в `defuse!` и проверьте, что HLO соберёт всё в один fused-кирнел.
 4. Прогоните датасет через `(cross-val-score ...)` из модуля ML (гл. 9).
 5. Сохраните обученные веса через `save-npy w "w.npy"` и проверьте их в NumPy.
+6. Вставьте клип между backward и шагом и посмотрите, как меняется обучение:
+
+   ```lisp
+   (grad! loss)
+   (clip-grad! 1.0 w b)      ;; норма до клипа — в ответе
+   (sgd-step w lr)
+   ```
+
+7. Снимите чекпоинт весов и состояния Adam и продолжите обучение из него:
+
+   ```lisp
+   (defvar snap (adams-snapshot (list w b)))
+   (qsrd-save "ckpt.qsrd" (list 'w w 'b b 'adam snap))
+   ```
 
 ## 17.4 Расширения: нейросимвольный классификатор (NS-IF)
 

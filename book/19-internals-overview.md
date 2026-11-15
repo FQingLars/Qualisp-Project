@@ -41,18 +41,18 @@ src/
 │                  simd.hpp (slab-ядра), trace.{hpp,cpp} (хронология владения), image.{hpp,cpp} (образы, гл. 21)
 ├── reader/        CharStream, Readtable
 ├── eval/          Interpreter, специальные формы, символьный движок
-├── prim/          примитивы: единая prim-таблица (80+: арифметика, тензоры, autograd, HLO, FFI, IO, data)
-├── runtime/       рантайм-поддержка исполнения
+├── prim/          примитивы: единая prim-таблица (арифметика, тензоры, autograd, HLO, FFI, IO, data)
+├── runtime/       пуст: mingw-шимы и тензорный рантайм разнесены по своим каталогам
 ├── types/         Type, TypeChecker (постепенная типизация)
 ├── macros/        MacroExpander, backquote
 ├── mop/           StructDef, StructRegistry, Struct, TraitDef, TraitRegistry (структуры и трейты)
 ├── tensor/        Tensor, GradientTape (F16/F32/F64/I32/I64/U8)
 ├── gpu/           Device (абстракция устройства; реализация одна — CPU)
-├── hlo/           HloGraph, HloNode, HloOp (вкл. ROUTE), оптимизации, fingerprint
+├── hlo/           HloGraph, HloNode, HloOp (вкл. ROUTE, ATTENTION), оптимизации, fingerprint
 ├── jit/           stencils.hpp, copypatch.{hpp,cpp} — JIT замыканий (copy-and-patch, RX-страницы)
 ├── codegen/       HloCodeGen: единый стенсил-эмиттер compile_hlo_stencil (W^X-страницы, гл. 10)
-├── symbolic/      S1-S8 (match, unify, plist, defrule, amb, compiler-macros, defhloop)
-├── ns/            RouteHop, Router, GuiltDetector (S9)
+├── symbolic/      match, unify, plist, defrule, amb, compiler-macros
+├── ns/            RouteHop, Router, GuiltDetector
 ├── data/          foundation, qserde (.qsrd-сериализация)
 ├── embed/         Embedding C API: библиотека `qualisp-core` (заголовок `qualisp.h`) — C зовёт Lisp (гл. 16)
 ├── ffi/           FFI-LOAD/FFI-DEFUN/FFI-DEFSTRUCT/FFI-IMPORT (dlopen + dlsym)
@@ -63,6 +63,8 @@ src/
 ├── stdlib/        *.qlsp → embedded_modules[] (через xxd -i)
 └── main.cpp       REPL/интерпретатор (JIT встроен — отдельного компилятора нет)
 ```
+
+Рядом с `src/` — `tools/prof` (Rust-профилировщик), `tools/dbg` (Rust-отладчик), `editors/vscode` и `editors/nvim`.
 
 Модули stdlib вшиты в бинарник (`cmake/stdlib_embed.cmake`), поэтому изменения stdlib
 требуют пересборки.
@@ -187,7 +189,9 @@ struct EnvFrame {
 
 Из `sym_*` в `src/eval/interpreter.cpp`:
 
-`QUOTE, IF, PROGN, LAMBDA(\), LET, LET*, DEFUN, DEFUSE, DEFUSE!, DEFMACRO, MACROLET, DEFVAR, SETQ, COND, WHILE, AND, OR, BACKQUOTE, IMPORT, THE, GENSYM, MACROEXPAND, MACROEXPAND-1, FUNCALL, APPLY, DEFSTRUCT, IMPL, TRAIT, MODULE, SLOT-VALUE, SET-SLOT, MATCH, UNIFY, SUBST, AMB-LET, REQUIRE, AMB-COLLECT, ASSERT-FACT, RETRACT-FACT, DEFRULE, QUERY, RUN-RULES, DEFINE-COMPILER-MACRO, DEFHLOOP, NS-IF, NS-GRAD!, TENSOR, FUTURE, PMAP` — и **80+ примитивов** (арифметика, тензоры, autograd, HLO, FFI, IO, data). Макрос `deftape!` (определение дифференцируемой функции, гл. 7.8) живёт в stdlib (`stdlib/ml.qlsp`) поверх примитива регистрации.
+`QUOTE, IF, PROGN, LAMBDA(\), LET, LET*, DEFUN, DEFUSE, DEFUSE!, DEFMACRO, MACROLET, DEFVAR, SETQ, COND, WHILE, AND, OR, BACKQUOTE, IMPORT, THE, GENSYM, MACROEXPAND, MACROEXPAND-1, FUNCALL, APPLY, DEFSTRUCT, IMPL, TRAIT, MODULE, SLOT-VALUE, SET-SLOT, MATCH, UNIFY, SUBST, AMB-LET, REQUIRE, AMB-COLLECT, ASSERT-FACT, RETRACT-FACT, DEFRULE, QUERY, RUN-RULES, DEFINE-COMPILER-MACRO, HLO-START, NS-IF, NS-GRAD!, TENSOR, FUTURE, PMAP` — и **примитивы** (арифметика, тензоры, autograd, HLO, FFI, IO, data).
+
+`AND`/`OR` — гибрид: в позиции головы формы это ленивые спецформы с коротким замыканием, а как значение (`(apply and ...)`) — n-арные функции. `HLO-START` — special form, ограничивающая конфиг и трассировку своим телом (гл. 10). `NS-CONFIG` — обычный примитив чтения/записи конфига (гл. 14.8). Макрос `deftape!` живёт в `stdlib/core.qlsp` поверх примитива регистрации (гл. 7.8).
 
 `DEFSTRUCT` задаёт структуру (имя + поля + заявленные трейты), `IMPL` — методы типа
 (обычные функции, диспетч по первому аргументу), `TRAIT` — контракт из методов
@@ -226,7 +230,7 @@ Tensor: dtype (F16/F32/F64/I32/I64/U8), shape, strides, numel,
   с полиномом AVX2), диспетчеризация идёт по layout, одометр работает без аллокаций.
 - `MATMUL` — `cblas_sgemm` (OpenBLAS): транспонирования выполняются внутри GEMM
   (флаги `atrans`/`btrans`), backward-логи и шаги SGD/ADAM работают на сырых указателях.
-- `reshape`/`transpose` — глубокие копии (view нет, гл. 4).
+- `reshape`/`transpose` — глубокие копии: writable views нет. Read-only окна `T-ROWS`/`T-SLICE` (и строковые `STRING-VIEW`/`STRING-REF`) — алиас с владением по счётчику; скретч-владелец при создании окна повышается, escape в stable материализует копию (гл. 5.5.8, 6.4).
 - `TensorBufferPool`: exact-size free list + кэш по (shape, dtype) — повторяющиеся
   размеры (батчи, активации) переиспользуются за O(1). Пул ограничен по объёму: при
   переполнении лишние буферы уходят системе, а не удерживают RSS за мёртвыми данными.
@@ -256,8 +260,7 @@ class GradientTape {  // thread_local singleton
 ```
 
 `backward` идёт по dataflow-графу в reverse-topo (потребители раньше производителей) через
-`result → producer`-карту, накапливая `+=` градиенты в `inputs`. `GradNode::inputs` хранит
-`Tensor*` (не SExpr) — autograd не завязан на интерпретатор.
+`result → producer`-карту, накапливая `+=` градиенты в `inputs`. Журнал ленты доступен из языка как `(TAPE-FORM)` — записи `(OP результат (входы...) payload)`, новые первыми; рёбра — те же объекты тензоров (идентичность по `EQ`), поэтому `GRAD!` пишет в поле того же `Tensor`, что видит программа.`
 
 Нейросимвольные `NS-IF`/`NS-GRAD!` (см. гл. 14) добавляют «вину»: STE-градиент для
 роутера, блокировка ошибочных ветвей через `blocked_set_t`.
@@ -335,10 +338,14 @@ class GradientTape {  // thread_local singleton
 ### Узлы и операции
 
 Граф из узлов `HloOp` (см. `src/hlo/graph.hpp`): `PARAMETER, CONSTANT, DOT, ADD, MUL, RELU,
-FUSION, TUPLE, OUTPUT, LOOKUP, ARGMAX, SOFTMAX, COMPOSITE, CODEGEN, WEIGHTED_LOOKUP, ROUTE`.
+FUSION, OUTPUT, LOOKUP, ARGMAX, SOFTMAX, COMPOSITE, WEIGHTED_LOOKUP, ROUTE, TRANSPOSE,
+ATTENTION, EXP, DIV, SUM, MAX`.
 ROUTE-узел описывает только программу: ветви-подграфы внутри узла и OR-overlap-метки; то,
 что оставляет прогон, живёт на программе (§19.9). Разрешение вины — OR-aware, взятая
 ветвь выигрывает: `resolve_correct` у узла и у tape-роутера считают одинаково.
+FUSION несёт дерево выражения над листьями `(IN k)` (словарь `ADD/MUL/RELU/ABS/NEG/CLAMP01/COPY/TANH`),
+а `EXP/DIV/SUM/MAX` — общие узлы с payload-маской осей: так любая Lisp-композиция даёт
+корректный граф. `ATTENTION` — fused-узел, в который сворачивается `DOT(SOFTMAX(...), v)`.
 
 ### Форма графа — мастер, `HloGraph` — кэш понижения
 
@@ -365,11 +372,10 @@ CSE, DCE и FUSION работают на форме как `SExpr → SExpr`. И
 списки float: сохраняется dtype, и round-trip точен для любого dtype. Имена операций берутся
 из одной таблицы `hlo_op_names` в обе стороны, так что добавление операции — одна строка.
 
-**FUSION** сливает цепочки ADD/MUL/RELU (не только содержащие RELU) и кодирует **строгий
-левый сгиб**: головная бинарная операция берёт два внешних входа, следующая — сгибающийся
-результат и ровно один новый вход, RELU — только сгибающийся результат. Точка соединения
-двумя поглощаемыми входами левым сгибом не выражается, поэтому такие узлы сливаются лишь
-по отдельности.
+**FUSION** сливает поэлементные операции в узел с **деревом выражения** над листьями `(IN k)`
+(словарь `ADD/MUL/RELU/ABS/NEG/CLAMP01/COPY/TANH`): дерево выражает ветвление и точки
+соединения, поэтому `(T+ (c3 x) (c3 x))` сливается в один узел. Ограничения стенсила:
+≤ 8 одновременно живых ymm и ≤ 5 листьев.
 
 **dtype** живёт и в `HloNode`, и в форме. `fits_stencil` пропускает в стенсил только F32 и
 I32 — **f16 уходит в интерпретаторный фоллбэк** (в стенсиле f16 портил данные без ошибки).
@@ -398,10 +404,12 @@ I32 — **f16 уходит в интерпретаторный фоллбэк** 
 `compile_hlo_stencil` — один проход по графу выписывает байтовые AVX2-стенсилы с «дырками»
 (imm-формы, rel32, movabs-адреса хелперов), патчит их и копирует в W^X-страницу процесса.
 Кернел — C-ABI-функция `void fn(float** params, float* out)`; узел `DOT` → `call cblas_sgemm`
-(адрес прошивается movabs-патчем). Подмножество: PARAMETER, скалярный CONSTANT, DOT,
-ADD/MUL/RELU, CODEGEN (`tanh`/`fabs`/`fneg`/`clamp01`/`copy`), SOFTMAX, ARGMAX, LOOKUP,
-WEIGHTED_LOOKUP; фоллбэк — для ROUTE, COMPOSITE/TUPLE. Промежуточного IR нет — LLVM-путь
-удалён.
+(адрес прошивается movabs-патчем). Подмножество: PARAMETER, CONSTANT, DOT, ADD/MUL/RELU,
+FUSION-деревья, SOFTMAX, ARGMAX, LOOKUP, WEIGHTED_LOOKUP, ATTENTION, TRANSPOSE; фоллбэк — для
+ROUTE, COMPOSITE, `EXP/DIV/SUM/MAX` и несовместимых форм. Промежуточного IR нет — LLVM-путь
+отсутствует. Стенсилы портированы на Win64 ABI; у страниц нет `.pdata`, поэтому исключение
+не должно пересекать нативный кадр (фасады `call_value`/`rest_list` ловят его и возвращают
+bail-токен).
 
 Кэш — in-process по fingerprint (версия эмиттера + shape-ключ + dtype). Дискового кэша нет.
 Fallback: граф вне компилируемого подмножества → интерпретация клонированного графа
@@ -446,7 +454,7 @@ OPT)`. `GRAPH-DATA` отдаёт копию формы и **не строит п
 - **Сериализация компиляции между потоками**: страница публикуется в общий список и общий
   кэш, поэтому компиляция под асинхронным слоем берёт блокировку один раз на
   компилируемую функцию (рекурсивно — компиляция может компилировать вызываемое).
-- **Только SysV x86-64** — стенсилы выписаны руками под эту ABI.
+- **Только SysV и Win64 x86-64** — стенсилы выписаны под эти две ABI.
 
 ## 19.10 Neuro-Symbolic Router
 
@@ -480,25 +488,42 @@ Language Server, автономный (JSON-RPC over stdio, встроенный
   инкрементальная синхронизация (`change: 2`) через офсетный сплайсинг — без перечитывания
   документа.
 - **Диагностики**: незакрытая форма (с позицией открывающей скобки), лишняя `)`, незакрытая
-  строка — точные диапазоны.
+  строка — точные диапазоны; семантическая диагностика арности известных `defun`/`defmacro`
+  (только превышение — недостающие аргументы движок связывает с `nil`); Lisp-1 lint (имя
+  функции в позиции значения без `#'`).
 - **Воркспейс-индекс** на initialize: скан `*.qlsp` (глубина ≤ 8, кап 500 файлов,
-  пропуск `.git`/`build*`/`node_modules`/`.cache`); didSave/didClose перечитывают файл с
-  диска.
-- **Навигация**: cross-file definition (Location | Location[], кап 20), references (кап 200),
-  documentHighlight, rename (WorkspaceEdit.changes по индексу, кап 50 URI), workspace/symbol
-  (кап 100), documentSymbol (14 def-видов + `deftest` со строковым именем); сопоставление
-  символов без учёта регистра (ридер апкасит).
-- **Комфорт**: foldingRange (пары OPEN/CLOSE на разных строках), formatting (Lisp-отступы:
-  тело defun/let/if/… = col+2, аргументы после головы headCol+len+1; многострочные строки и
-  пустые строки не трогаются), ~140 автодополнений из `lsp_tables.inc` с
-  hover-документацией.
-- **Ограничения**: семантические диагностики (unbound vars, арность — нужен eval-контекст),
-  semantic tokens, signatureHelp; колонки в байтах (не UTF-16).
-- Регрессионный тест — `tests/lsp_test.sh` (JSON-RPC-драйвер over stdio, 35 проверок).
+  пропуск `.git`/`build*`/`node_modules`/`.cache`); `workspace/didChangeWatchedFiles`
+  обновляет индекс.
+- **Навигация**: scope-aware `definition`/`references`/`rename` — каждое вхождение
+  разрешается в тождество связывания (параметры с `&optional`/`&rest`/`&key`, точечный
+  хвост, типизированные `a: Int`; `let`/`let*`, `do`/`do*`, `dolist`/`dotimes`,
+  `multiple-value-bind`); вложенная тень — другое связывание; quoted/quasiquoted — данные,
+  не переименовываются. Плюс `documentHighlight`, `workspace/symbol`,
+  `documentSymbol` (def-виды + `deftest` со строковым именем).
+- **Семантические токены** (`semanticTokens/full`): легенда
+  function/macro/variable/parameter/keyword/string/number/comment/operator; голова формы,
+  параметры `defun`/`lambda`, переменные `let`/`loop`; функции в позиции значения — по
+  вызовам/индексу/таблице stdlib; комментарии отдельным списком; многострочные литералы по
+  строкам; скобки — `operator` + модификатор `depth0..depth7` (rainbow).
+- **Удобства**: `signatureHelp`, `inlayHint`, `selectionRange`, `callHierarchy`
+  (prepare/incoming/outgoing), code actions (дописать `)`), document links
+  (`load`, `import-from`), foldingRange, formatting (Lisp-отступы: тело defun/let/if/… =
+  col+2, аргументы после головы headCol+len+1; многострочные строки и пустые строки не
+  трогаются), автодополнение с hover-документацией.
+- **Таблица stdlib**: `tools/gen_lsp_symbols.py` → `src/lsp/stdlib_symbols.inc` (имя, вид,
+  сигнатура, параметры, docstring, required/optional/rest); работает без исходников stdlib,
+  CI сверяет `--check`.
+- **UTF-16**: входящие позиции переводятся в байты, исходящие диапазоны — в UTF-16 code
+  units, поэтому кириллица не сдвигает позиции.
+- **Ограничения**: индекс — снимок initialize + watched files; unbound-проверки нет.
+- Регрессионный тест — `tests/lsp_test.sh` (JSON-RPC-драйвер over stdio, **112 проверок**,
+  зелёный под ASan и wine; на Windows `file:///C:/dir` → `C:/dir`, stdout в бинарном режиме).
 - Пакетный режим того же движка — `tools/qlsp-check.py`: диагностика читателя
   (незакрытые/лишние скобки) плюс структурный план `defun`-дерева (`--symbols`).
   Для C++ навигация идёт через `clangd` по `build/compile_commands.json`, который генерирует
   CMake (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`).
+- Расширения: `editors/vscode/` (TextMate-грамматика, language-configuration, радужные
+  скобки, `npm install && npm run package` → `.vsix`) и `editors/nvim/qualisp.lua`.
 
 ## 19.12 Сборка и инструменты
 
@@ -518,12 +543,18 @@ cmake -B build-windows \
 - `qualisp` — REPL/интерпретатор + встроенный JIT (OpenBLAS, OpenMP; LLVM не нужен).
 - `qualisp-lsp` — LSP-сервер (только `src/lsp/server.cpp`).
 - `qvalent` — пакетный менеджер (только `src/qvalent/main.cpp`).
+- `qualisp-prof` — профилировщик (Rust, CMake `-DQUALISP_PROF=ON`, по умолчанию OFF).
+- `qualisp-dbg` — отладчик (Rust, CMake `-DQUALISP_DBG=ON`, по умолчанию OFF).
 
+Без cargo сборка и CI остаются зелёными: инструменты разработчика — опциональные цели.
 AOT-компилятора нет: всё нативное собирается на лету из S-выражений.
 
 Модули stdlib вшиваются в бинарник на этапе сборки (`cmake/stdlib_embed.cmake`, через
 `cmake/gen_stdlib_header.cmake` — без `xxd` для переносимости на MSYS2/MinGW) — поэтому
 дистрибутив Qualisp — один файл ~2 МБ.
+
+Гейты: `tools/asan_gate.sh`, `tools/poison_gate.sh`, `tools/async_gate.sh`,
+`tools/eager_loop_gate.sh`, `tools/prof_live_gate.sh`, `tools/dbg_gate.sh`.
 
 ### Windows-сборка
 
@@ -556,18 +587,19 @@ DOT) — CI зелёный на Linux и Windows.
 | SIMD (AVX2/FMA) | 8×f32 = 256 бит |
 | SIMD (NEON) | 4×f32 = 128 бит |
 | Кэш HLO | in-process fingerprint (версия эмиттера + shape-ключ + dtype) |
-| Порог heal JIT | 64 интерпретируемых вызова (`k_hot_calls`, гл. 20) |
-| Модули stdlib вшито | 16 (core string ml dl ns io regex audio datetime pkg errors visual tablet async collections argparser) |
-| `dl` | слои-как-данные; `linear`/`net-forward`/`train-step`/`train-epochs` |
-| Автодополнения LSP | ~140 (`lsp_tables.inc`) |
-| Стенсилы JIT | SysV x86-64 |
+| Порог JIT | `k_hot_calls = 64` вызовов до компиляции страницы; heal — те же 64 |
+| Листья FUSION | `k_max_operands = 5`; одновременно живых ymm — не более 8 |
+| Модули stdlib вшито | 16 (collections core string ml dl ns io regex audio datetime pkg errors visual tablet async argparser) |
+| `dl` | слои-как-данные; `linear`/`net-forward`/`train-step`/`train-epochs`, `attention`, `emb-lookup`, чекпоинт Adam, клип |
+| Таблица символов LSP | `src/lsp/stdlib_symbols.inc`, генерируется `tools/gen_lsp_symbols.py` |
+| Стенсилы JIT и HLO | AVX2 x86-64, SysV и Win64 |
 | GCC/Clang (минимум) | GCC 13+ / Clang 16+ (C++20); LLVM не нужен |
 | qvalent локальный каталог | `./qualisp-packages/<name>/` |
 | qvalent кэш | `$HOME/.cache/qualisp/<deployer>/<repo>/` |
 | QSRD v2 magic | `"QSRD"` (u16 ver) |
 | Tail-call | self-хвост пере-биндит кадр; гейт по живым tape-узлам; `let`/`let*` разворачиваются до 8 уровней |
 | Контракт CI | `run-tests` считает падения в `*test-failed*` (упавший assert проваливает тест); процесс возвращает 1 при любом упавшем сюите; сводка печатает счётчики |
-| Тесты | 150 сюит, зелёный (Release, Linux); ASan-гейт с `detect_leaks=1` по всему корпусу; poison-гейт `QUALISP_RC_POISON=1` по всему корпусу; прод-датасеты `tests/data/*.csv` прогоняются продакшен-сценарием обучения |
+| Тесты | **193** `.qlsp`-сюиты в `tests/` (плюс фазовые в `test/` и C-тесты embedding), зелёный (Release, Linux); ASan-гейт с `detect_leaks=1` по всему корпусу; poison-гейт `QUALISP_RC_POISON=1` по всему корпусу |
 
 ## 19.14 Известные ограничения
 
@@ -580,9 +612,9 @@ DOT) — CI зелёный на Linux и Windows.
   - часть буферов узлов при ROUTE освобождается небезопасно: тела ветвей читают значения
     главного графа «ambient», без ребра от ROUTE. Направление — собственное пространство
     буферов у ветвей, то есть переработка исполнителя, а не точечная правка;
-  - `ABS` на тензоре отдаёт мусор (примитив скалярный и не проверяет тип);
-  - `codegen_kind` — единственное оставшееся второе представление: для `:codegen` тело
-    отбрасывается, а смысл ядра живёт в C++ if-chain эмиттера. Это сознательный долг.
+  - `ROUTE`, `COMPOSITE`, `EXP/DIV/SUM/MAX` и смешанные broadcast/reduce-маски идут
+    интерпретаторным фоллбэком;
+  - `GRAPH->PROGRAM` с claims (ROUTE) отказывает.
 - **Диспетчеризация ROUTE стенсилами** не поддерживается: ROUTE исполняется fallback-программой.
 - **`let` под биндингом с 1- или 2-байтным dtype теряет свои биндинги** (F16, U8; на F32 не
   воспроизводится). Практический обход: такие тензоры связывать через `defvar`, вложенный
@@ -601,9 +633,14 @@ DOT) — CI зелёный на Linux и Windows.
   разбираются.
 - **`run-tests` освобождает реестр в конце**: повторный вызов в том же скрипте даёт `0/0
   passed`.
-- **JIT-стенсилы** — только SysV x86-64; покрытое подмножество форм невелико;
+- **JIT-стенсилы** — AVX2 x86-64 под SysV и Win64; покрытое подмножество форм невелико;
   `MACROLET`-тела не компилируются; bail = повтор тела интерпретатором (transaction-retry,
   гл. 20.7).
+- **У JIT-страниц и HLO-ядер нет `.pdata`**: исключение не должно пересекать нативный кадр —
+  фасады `call_value`/`rest_list` ловят его и возвращают bail-токен.
+- **FFI-трамплин Windows — SysV-only**: `FFI-LOAD` работает, `FFI-DEFUN`/вызов падает.
+- **Асинхронный слой**: при ≥ 3 воркерах задача с циклом по `let`-переменной может вернуть
+  испорченное значение; пул по умолчанию последовательный.
 - **`DISCARD-JIT` из jitted-кода снимает страницу под собой** — известная шероховатость
   (гл. 20).
 - **Колбэков C→Lisp во FFI нет**: FFI односторонний — Lisp вызывает C, обратного трамплина не
@@ -653,7 +690,11 @@ DOT) — CI зелёный на Linux и Windows.
   точке деления.
 - **Payload независим от ячеек.** Тензор — одно выделение [заголовок | данные] с единственным
   разрушителем; struct-слоты и байты строк — всегда `malloc`.
-- **Наблюдаемость.** `(mem-report)` несёт ключи `vm-alloc-bytes`/`vm-free-bytes`/`vm-live-bytes`,
+- **Окна.** Read-only окна (`T-ROWS`/`T-SLICE`, строковые `STRING-VIEW`/`STRING-REF`) — явный
+  алиас только для чтения: владелец держится счётчиком, скретч-владелец повышается, escape в
+  stable материализует копию. Writable views по-прежнему нет, и это не исключение из трёх
+  правил.
+- **Наблюдаемость.** `(mem-report)` несёт 28 ключей: `vm-alloc-bytes`/`vm-free-bytes`/`vm-live-bytes`,
   `scopes-born`/`scopes-died`, `scratch-cells`/`scratch-cells-released`/`scratch-cells-live`,
   `graph-buffer`/`graph-bytes` и прежние реестры и счётчики (полный список — §5.5.9).
   Диагностика: `QUALISP_MEM_ROOTS=1` — обход живых корней и кольцо rc-событий для охоты за
@@ -663,18 +704,23 @@ DOT) — CI зелёный на Linux и Windows.
 ---
 
 Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21
-(образы), гл. 22 (Tablet). Тесты — 150 сюит в `tests/` (плюс фазовые в `test/`): `jit.qlsp`,
-`jit_page_lifetime.qlsp`, `func_atom.qlsp`, `tape_fn.qlsp`, `async.qlsp`, `image.qlsp`,
-`hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`, `hlo_graph_data.qlsp`, `hlo_form_canary.qlsp`,
-`f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`, `memory_setq.qlsp`,
-`loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`, `expansion_cache.qlsp`,
-`debug_trace.qlsp`, `tail_call.qlsp`, `rc_contract.qlsp`, `rc_escape.qlsp`,
-`scope_tree.qlsp`, `b2_counters.qlsp`, `b3_regions.qlsp`, `adam_state.qlsp`,
-`arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`, `tref.qlsp`, `print_arity.qlsp`,
-`math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`, `ns_router_hlo.qlsp`,
-`homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит `production_training.qlsp`
-(CSV-датасеты из `tests/data/`: классификация и регрессия, HLO-депл с проверкой против
-интерпретатора, плоская память по эпохам, round-trip образа и весов). Проверочный контур
-памяти — гл. 5.5: poison-гейт (`tools/poison_gate.sh`), ASan-гейт, `POOL-DUP`,
-`QUALISP_MEM_ROOTS` и `(mem-report)`; гейт асинхронного слоя и
-занятости ядер — `tools/async_gate.sh`.
+(образы), гл. 22 (Tablet). Тесты — **193** `.qlsp`-сюиты в `tests/` (плюс фазовые в `test/`):
+`jit.qlsp`, `jit_page_lifetime.qlsp`, `func_atom.qlsp`, `tape_fn.qlsp`, `tape_form.qlsp`,
+`tape_grad_accum.qlsp`, `tape_gather.qlsp`, `tape_slice.qlsp`, `tensor_gather.qlsp`,
+`slice_lifetime.qlsp`, `string_ref.qlsp`, `operator_overload.qlsp`, `activation_grad.qlsp`,
+`grad_clip.qlsp`, `adam_checkpoint.qlsp`, `inference.qlsp`, `dl_features.qlsp`,
+`attention.qlsp`, `async.qlsp`, `image.qlsp`, `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`,
+`hlo_start.qlsp`, `hlo_form_master.qlsp`, `hlo_program_form.qlsp`, `hlo_attention.qlsp`,
+`hlo_graph_data.qlsp`, `f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`,
+`memory_setq.qlsp`, `loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`,
+`expansion_cache.qlsp`, `debug_trace.qlsp`, `tail_call.qlsp`, `stack_guard.qlsp`,
+`rc_contract.qlsp`, `rc_escape.qlsp`, `scope_tree.qlsp`, `b2_counters.qlsp`,
+`b3_regions.qlsp`, `adam_state.qlsp`, `arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`,
+`tref.qlsp`, `print_arity.qlsp`, `math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`,
+`ns_router_hlo.qlsp`, `homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит
+`production_training.qlsp` (CSV-датасеты из `tests/data/`: классификация и регрессия,
+HLO-депл с проверкой против интерпретатора, плоская память по эпохам, round-trip образа и
+весов). Проверочный контур памяти — гл. 5.5: poison-гейт (`tools/poison_gate.sh`),
+ASan-гейт, `POOL-DUP`, `QUALISP_MEM_ROOTS` и `(mem-report)`; гейт асинхронного слоя и
+занятости ядер — `tools/async_gate.sh`; гейты профилировщика и отладчика —
+`tools/prof_live_gate.sh` и `tools/dbg_gate.sh`.

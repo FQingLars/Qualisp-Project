@@ -1,13 +1,13 @@
 # Глава 15. Стандартная библиотека
 
-Все модули стандартной библиотеки **вшиты в бинарник** (`stdlib/*.qlsp` генерируются в заголовки через `xxd -i` и компилируются в бинарник на этапе сборки — `cmake/stdlib_embed.cmake`). **16 модулей** загружаются **при старте** REPL/раннера (итерация по `embedded_modules[]` в `src/main.cpp`), причём порядок важен: `core` грузится первым (через `Interpreter::mark_module_loaded(m->name)`). `(import M)` — идиома для явности (повторный импорт — дешёвый no-op). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`. Семантика импорта и `MODULE`-заголовок с описью зависимостей — в 15.14.
+Все модули стандартной библиотеки **вшиты в бинарник** (`stdlib/*.qlsp` генерируются в заголовки через `xxd -i` и компилируются в бинарник на этапе сборки — `cmake/stdlib_embed.cmake`). **16 модулей** загружаются **при старте** REPL/раннера (итерация по `embedded_modules[]` в `src/main.cpp`), причём порядок фиксирован: `collections` — первым (`map`/`filter`/`reduce` нужны модулям, которые грузятся после), `tablet` — последним. `(import M)` — идиома для явности (повторный импорт — дешёвый no-op). Поддержан частичный импорт: `(import-from (ml knn-predict nb-fit))`. Семантика импорта и `MODULE`-заголовок с описью зависимостей — в 15.14.
 
 | Модуль | Файл | Размер | Содержание |
 |---|---|---|---|
 | `core` | `stdlib/core.qlsp` | ~124 строки | утилиты списков (итеративные: `length`/`reverse`/`member`/`last`/`butlast`/`nth` не жгут стек), `let*`, тестовый фреймворк |
-| `string` | `stdlib/string.qlsp` | ~60 строк | строковые операции, char-коды, примитивы + композитные |
+| `string` | `stdlib/string.qlsp` | ~60 строк | строковые операции, окна (`STRING-REF`/`STRING-VIEW`), char-коды, примитивы + композитные |
 | `ml` | `stdlib/ml.qlsp` | ~414 строк | классический ML: KNN, NB, Tree, RF, GB, KMeans, CV, GridSearch, потери |
-| `dl` | `stdlib/dl.qlsp` | ~159 строк | слои-как-данные, `linear`, `net-forward`, `train-step`, `train-epochs` |
+| `dl` | `stdlib/dl.qlsp` | ~159 строк | слои-как-данные, `linear`, `net-forward`, `train-step`, `train-epochs`, `attention`, `softmax!`, чекпоинт Adam |
 | `ns` | `stdlib/ns.qlsp` | ~126 строк | экспорт нейросимвольного слоя: маршрутизация по слотам, RL-агент-кодер (гл. 14.10) |
 | `io` | `stdlib/io.qlsp` | ~80 строк | файлы, CSV (RFC-4180), `slurp`, `spit` |
 | `regex` | `stdlib/regex.qlsp` | ~17 строк | регулярки: `re-find`, `re-replace`, `re-split` |
@@ -47,7 +47,7 @@
       t)))
 ```
 
-Также определены 16 сокращений `car`/`cdr`: `caar`, `cadr`, `cdar`, `cddr`, `caaar`, `caadr`, `cadar`, `caddr`, `cdaar`, `cdadr`, `cddar`, `cdddr`, плюс `second`, `third`, `fourth`, `first`, `rest`.
+Также определены car/cdr-сокращения: `caar`, `cadr`, `cdar`, `cddr`, `caaar`, `caadr`, `cadar`, `caddr`, `cdaar`, `cdadr`, `cddar`, `cdddr`, плюс `second`, `third`, `fourth`, `first`, `rest`.
 
 ## 15.2 string — строковые операции
 
@@ -58,7 +58,7 @@
 | Примитив | Что делает | Python-аналог |
 |---|---|---|
 | `STRING-LENGTH s` | длина строки | `len(s)` |
-| `STRING-SPLIT s delim` | список подстрок | `s.split(delim)` |
+| `STRING-SPLIT разделитель строка` | список подстрок; **разделитель — первый аргумент** | `s.split(delim)` |
 | `STRING-JOIN list delim` | объединение | `delim.join(list)` |
 | `STRING-UPCASE s` | uppercase | `s.upper()` |
 | `STRING-DOWNCASE s` | lowercase | `s.lower()` |
@@ -70,6 +70,8 @@
 | `CODE-CHAR n` | символ по ASCII-коду | `chr(n)` |
 | `STRING-TO-NUMBER s` | парсинг числа | `float(s)` / `int(s)` |
 | `STRING-CONTAINS s sub` | предикат вхождения | `sub in s` |
+| `STRING-REF s i` | байт `0..255` по индексу, без аллокации | `s[i]` у `bytes` |
+| `STRING-VIEW s from len` | окно `[from, from+len)` без копирования | `s[from:from+len]` |
 | `STRING< a b` | лексикографическое `<` | `a < b` (для строк) |
 
 ### Композитные (на примитивах, в `stdlib/string.qlsp`)
@@ -85,10 +87,33 @@
 (string-words s)                ; split по whitespace
 (string-repeat s n)             ; n копий через STRING-JOIN
 (to-string x)                   ; STRING(NUMBER-TO-STRING ...) для скаляров
-(string s)                      ; константная строка-обёртка
 ```
 
 > 🐍 Аналог модуля `str` Python (Python 3.6+). В Python многое встроено в сам язык (`len`, `+`, `[]`), здесь — отдельные примитивы из-за Lisp-стиля (один prim = одна функция).
+
+### Строковые окна: `STRING-REF` и `STRING-VIEW`
+
+Строка — не только значения, но и **окна** в неё: `(STRING-VIEW s from len)` даёт окно без копирования, `(STRING-REF s i)` — байт по индексу (0..255), тоже без аллокации.
+
+```lisp
+(STRING-VIEW "hello" 1 3)              ;; → "ell" — окно
+(type-of (STRING-VIEW "hello" 1 3))    ;; → STRING
+(equal (STRING-VIEW "hello" 1 3) "ell") ;; → T — сравнение по содержимому
+(STRING-REF "hello" 1)                 ;; → 101 — байт 'e'
+(STRING-LENGTH (STRING-VIEW "hello" 1 3)) ;; → 3
+(STRCAT (STRING-VIEW "hello" 1 3) "!")    ;; → "ell!"
+```
+
+Прозрачность — главное свойство окна: **для всех строковых операций окно — обычная строка**. `TYPE-OF` → `STRING`, `equal` сравнивает по содержимому, `STRING-LENGTH`, `STRCAT`, `SUBSTR`, `STRING-SPLIT`, `STRING-CONTAINS` работают одинаково. `STRING-SPLIT` над stable-строкой отдаёт куски-**окна**, а `string-slice`/`string-starts-with`/`string-ends-with` построены на окнах.
+
+Стоимость, а не семантика, — вот что меняется: над скретч-строкой и над окном (`view-of-view`) операции дают копию, а escape в stable (`defvar`) материализует копию. Границы — ошибка с именем операции:
+
+```lisp
+(STRING-VIEW "abc" 1 5)    ;; ERROR: string-view: range [1,6) out of [0,3)
+(STRING-REF "abc" 9)       ;; ERROR: string-ref: index 9 out of range (3)
+```
+
+> 🐍 В Python `s[1:3]` — тоже срез, но он всегда создаёт новую строку; в Qualisp окно живёт в исходной строке, пока его не материализуют копией.
 
 ### Замечание о `type-of`
 
@@ -235,7 +260,7 @@ CSV читается и пишется по RFC-4180: поля с запятым
 `CATCH-ERROR` — настоящий примитив: прогоняет тело и возвращает **одно** значение одной из двух форм:
 
 - **успех** — пара `(T . результат)`: `car` → `T`, `cdr` → результат тела;
-- **ошибка** — структура ошибки; у структуры `car` = `nil`, поэтому старая проверка «была ли ошибка» через `(car e)` работает как раньше.
+- **ошибка** — структура ошибки; у структуры `car` = `nil`, поэтому проверка «была ли ошибка» через `(car e)` работает.
 
 ```lisp
 (car (catch-error (lambda () 42)))                  ;; → T — успех
@@ -443,8 +468,8 @@ CSV читается и пишется по RFC-4180: поля с запятым
 |---|---|---|
 | `core` | утилиты списков, `let*`, тесты | builtins + pytest |
 | `string` | строки, char-коды | `str` (Python 3.6+) |
-| `ml` | классический ML + потери/softmax (377 строк на самом Qualisp) | scikit-learn |
-| `dl` | слои-как-данные, `linear`/`net-forward`/`train-step` | `torch.nn` (стиль Sequential) |
+| `ml` | классический ML: KNN, NB, деревья, ансамбли, KMeans, CV, grid search, метрики, потери | scikit-learn |
+| `dl` | слои-как-данные, `linear`/`net-forward`/`train-step`, `attention`, `softmax!`, gather-эмбеддинги, чекпоинт Adam, клип градиента | `torch.nn` (стиль Sequential) |
 | `ns` | экспорт нейросимвольного слоя, RL-агент-кодер | (нет аналога) |
 | `io` | файлы, CSV (RFC-4180) | `open`, `csv` |
 | `regex` | регулярки | `re` |
@@ -463,6 +488,8 @@ CSV читается и пишется по RFC-4180: поля с запятым
 ## 15.16 COLLECTIONS — map/filter/reduce и структуры данных
 
 Модуль `collections` (`stdlib/collections.qlsp`) собирает функции высшего порядка над списками и изменяемые структуры данных для алгоритмизации (A*, Дейкстра, DSU, топологическая сортировка). `map`/`filter`/`reduce` выражены композицией `cons`/`car`/`cdr` на самом Qualisp: stdlib-функция к тому же компилируется JIT — в отличие от примитива, который всегда вызов наружу.
+
+Обходы **итеративные**: `map`/`filter` идут `while`-циклом, `reduce` — хвостовой рекурсией, которую схлопывает TCO, поэтому глубина стека не зависит от длины списка. Список в сто тысяч элементов сворачивается без поднятия `EVAL-MAX-DEPTH`.
 
 ### map, filter, reduce: контракт
 
