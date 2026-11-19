@@ -1,726 +1,327 @@
 # Глава 19. Устройство компилятора
 
-Краткая экскурсия во внутренности Qualisp: как исходник превращается в программу, какие
-подсистемы за этим стоят и как они делят ответственность. Полное описание — в
-`ARCHITECTURE.md` дерева разработки.
+Краткая экскурсия во внутренности Qualisp релиза 0.19.15 (реализация на Zig): как исходник превращается в программу, какие подсистемы за этим стоят и как они делят ответственность. Полные решения по языку — в `SPEC.md`, архитектурная сводка и дорожная карта — в `AGENTS.md`, публичные API подсистем — в `src/CODE.md` и `src/*/CODE.md` дерева разработки.
 
 ## 19.1 Пайплайн
 
 ```text
-Исходник → CharStream → Readtable (reader) → SExpr-дерево в ConsCellPool (гл. 5)
-  → MacroExpander (backquote, defmacro, compiler-macros, MACROLET)
-  → TypeChecker (постепенная типизация)
-  → Interpreter::eval (special forms, применение функций, примитивы)
-    → Tensor-операции → GradientTape (запись autograd)
-    → GradientTape::backward (reverse-topo AD, blocked nodes для NS-IF)
-    → горячее замыкание → jit::compile_closure → copy-and-patch → RX-страница (гл. 20)
-  → HloProgram (форма графа — мастер) → program_lowered → HloGraph (одноразовый кэш)
-    → compile_hlo_stencil → AVX2-стенсилы → W^X-страница (гл. 10)
-    → NS-router (NS-IF/NS-GRAD! → per-sample routing + guilt detector; ROUTE-нода в HLO)
-                     ↓
-                LSP Server ←→ Editor
+Исходник
+  → lexer.zig            (текст → токены со спанами)
+  → reader.zig           (токены → S-выражения в Store)
+  → Session.expandBody   (раскрытие макросов, в т.ч. в телах defgraph/defuse)
+  → checker.zig          (статическая проверка типов, declareFunctions)
+  → Emitter.compile      (copy-and-patch: байты + relocations + source map)
+  → CodePage (W^X)       (выбрасываемый кэш)
+  → entry(frame, env, rt, out) → Value
+
+  defgraph → HLO-граф (trace на нулевых placeholders) → CompiledGraph
+           → ядра x86-64 / W^X-страница → forward / backward
+
+  ns-if → src/ns: атомы → знаки → band → ROBDD-покрытие → router → compaction
+                    → подграфы ветвей (только непустые)
 ```
 
-**Инвариант одной формы.** S-выражение — единственная авторитетная форма программы.
-Оба «компилятора» — JIT замыканий и HLO-стенсил-эмиттер — потребляют S-выражения и
-строят нативные страницы одним проходом, без промежуточного IR и без LLVM. Нативный код —
-выбрасываемый кэш: `DISCARD-JIT` и инвалидация по эпохе макросов пересобирают его из
-master-копий без изменения поведения.
+**Инвариант одной формы.** S-выражение — единственная авторитетная форма программы. Всё нативное — выбрасываемый кэш, выведенный из S-выражения: JIT-страница пересобирается из мастер-формы `Func`, HLO-граф — производный одноразовый артефакт мастер-формы `defgraph`, скомпилированный `defuse` — кэш скалярного цикла. Промежуточного IR, байткода, LLVM и AOT-компилятора нет. Нет и интерпретатора/tree-walk: конвейер — `read → expand → typecheck → emit → run`.
 
-То же правило действует и внутри HLO: мастер-копия программы — **форма графа**
-(`HloProgram::graph_form`), а `HloGraph` — производный **одноразовый кэш понижения**
-(`program_lowered`), который можно выбросить и перестроить; результат совпадает.
-
-Отдельного AOT-компилятора нет: всё нативное собирается на лету из S-выражений.
+Top-level форма компилируется и исполняется сразу; тело `defun` — при определении (`emitDefun` строит `FunctionTemplate` с готовым `entry`). По одному проходу по S-дереву, в порядке LNR: оператор, затем аргументы слева направо; top-level формы — слева направо.
 
 ## 19.2 Структура исходников
 
-```
+```text
+build.zig, build.zig.zon
 src/
-├── core/          Scope (HibLin), SExpr, Symbol, ConsCellPool, TensorBufferPool, StableMemory,
-│                  simd.hpp (slab-ядра), trace.{hpp,cpp} (хронология владения), image.{hpp,cpp} (образы, гл. 21)
-├── reader/        CharStream, Readtable
-├── eval/          Interpreter, специальные формы, символьный движок
-├── prim/          примитивы: единая prim-таблица (арифметика, тензоры, autograd, HLO, FFI, IO, data)
-├── runtime/       пуст: mingw-шимы и тензорный рантайм разнесены по своим каталогам
-├── types/         Type, TypeChecker (постепенная типизация)
-├── macros/        MacroExpander, backquote
-├── mop/           StructDef, StructRegistry, Struct, TraitDef, TraitRegistry (структуры и трейты)
-├── tensor/        Tensor, GradientTape (F16/F32/F64/I32/I64/U8)
-├── gpu/           Device (абстракция устройства; реализация одна — CPU)
-├── hlo/           HloGraph, HloNode, HloOp (вкл. ROUTE, ATTENTION), оптимизации, fingerprint
-├── jit/           stencils.hpp, copypatch.{hpp,cpp} — JIT замыканий (copy-and-patch, RX-страницы)
-├── codegen/       HloCodeGen: единый стенсил-эмиттер compile_hlo_stencil (W^X-страницы, гл. 10)
-├── symbolic/      match, unify, plist, defrule, amb, compiler-macros
-├── ns/            RouteHop, Router, GuiltDetector
-├── data/          foundation, qserde (.qsrd-сериализация)
-├── embed/         Embedding C API: библиотека `qualisp-core` (заголовок `qualisp.h`) — C зовёт Lisp (гл. 16)
-├── ffi/           FFI-LOAD/FFI-DEFUN/FFI-DEFSTRUCT/FFI-IMPORT (dlopen + dlsym)
-├── visual/        Dashboard (HTTP, TensorBoard-подобный)
-├── bindings/      bind.hpp, stb_image.cpp (нативные хелперы биндингов)
-├── qvalent/       qvalent CLI (пакетный менеджер)
-├── lsp/           server.cpp (только LSP, без движка)
-├── stdlib/        *.qlsp → embedded_modules[] (через xxd -i)
-└── main.cpp       REPL/интерпретатор (JIT встроен — отдельного компилятора нет)
+├── main.zig          CLI/REPL/runner; --trace, raiseStackLimit
+├── session.zig       Session: read→expand→check→emit→run; world/scratch;
+│                     загрузка модулей, defgraph/defuse, QSRD
+├── lib.zig           публичные экспорты
+├── span.zig          Span/Diagnostic
+├── symbol.zig        интернирование символов (верхний регистр)
+├── value.zig         Value, атомы, Cons, Rope
+├── store.zig         bump-хранилище cons/байтов, mark/restore
+├── lexer.zig         source → токены со спанами
+├── reader.zig        токены → S-выражения
+├── printer.zig       Value → читаемый текст
+├── program.zig       единый корень top-level форм
+├── runtime.zig       глобалы, Func/Env, кадры вызовов, страницы
+├── form.zig          cons/list, quasiquote
+├── syntax.zig        :syntax-операции
+├── types.zig         Type, парсер, assignable
+├── checker.zig       статический typechecker ядра
+├── overload.zig      ключи и разрешение перегрузки
+├── macros.zig        defmacro, expander, gensym
+├── eval.zig          evalValue: expand→check→emit→run
+├── jit/              emitter, memory (W^X), helpers, cache, stencils, abi
+├── prims/            list, math, string, io, type, error
+├── object.zig        struct/trait логика
+├── tensor/           Tensor + eager-операции + TensorBufferPool
+├── hlo/              граф, trace, forward/backward, compile/pool/fused, kernels
+├── ns/               atom, expr, bdd, coverage, router, compaction, form, plan
+├── ffi/              C-типы, trampoline, загрузка библиотек
+├── image/            бинарный формат QSRD
+├── profile.zig       трассировка Chrome Trace JSON
+├── stdlib.zig        11 встроенных модулей (через @embedFile)
+├── stdlib/*.qlsp     core, string, collections, test, io, ml, dl, symbolic,
+│                     argparse, tablet, neuro (+ probe.qlsp — только тесты)
+├── tests.zig         регистрация 834 тестов
+├── *_test.zig        24 файла с тестами
+└── test_support.zig  общий harness
+tools/qsrd/           читатель QSRD (inspect/verify/cat/params/symbols/extract)
+tools/qprof/          агрегатор трасс self/inclusive по именам
 ```
 
-Рядом с `src/` — `tools/prof` (Rust-профилировщик), `tools/dbg` (Rust-отладчик), `editors/vscode` и `editors/nvim`.
-
-Модули stdlib вшиты в бинарник (`cmake/stdlib_embed.cmake`), поэтому изменения stdlib
-требуют пересборки.
+Stdlib — Qualisp-код, вшитый в бинарник через `@embedFile`; `core` загружается и импортируется при старте, остальные модули — лениво при первом `import`. `probe.qlsp` — test-only fixture, вшивается только в test-сборки. В каждом подкаталоге `src/X/` лежит `CODE.md` с API и ограничениями подсистемы.
 
 ## 19.3 Reader
 
-Символьная диспетчеризация (`src/reader/readtable.cpp`):
+Лексер отделён от reader: `lexer.zig` превращает текст в токены со спанами, `reader.zig` — токены в S-выражения. Reader не типизирует и не исполняет: он возвращает `Value`/`Cons`, как требует инвариант одной формы. Ошибки — `diag` + error union, без panic.
 
-| Символ | Действие |
-|---|---|
-| `(` | разбор списка (правильного или dotted) |
-| `)` | error |
-| `'` | разворачивается в `(QUOTE ...)` |
-| `` ` `` / `,` / `,@` | `(BACKQUOTE ...)`, `(COMMA ...)`, `(COMMA-AT ...)` |
-| `#` | dispatch: `#'` → FUNCTION, `#(` → вектор, `#\` → литера |
-| `"` | строка с escape-последовательностями |
-| `;` | комментарий до конца строки |
+- Пробелы, табы, переводы строк; `;` — комментарий до конца строки.
+- Списки `( … )`, dotted pair `(a . b)`; `(`/`)`, `.`, `'`, `` ` ``, `,`, `,@` — отдельные токены.
+- `'x → (quote x)`, `` `x → (quasiquote x)``, `,x → (unquote x)`, `,@x → (unquote-splicing x)`, `\ → lambda`.
+- int64/f64 (`42`, `-7`, `3.14`, `1e-5`); `0xFF` и `1/2` числами не читаются.
+- Строки `"…"` с escape `\n \t \r \\ \"`; символы `#\a`, `#\space`, `#\newline`, `#\tab` (Unicode scalar u21). Векторы, `#'`, `#| |#` в срез не входят.
+- Символы регистронезависимы, интернируются в верхний регистр (`(quote a)` печатается `A`); `:name` — keyword, самовычисляемый.
 
-Токены: символы интернируются в верхнем регистре через `SymbolTable::instance()`
-(регистронезависимость); сначала пробуется парсинг числа (int64 → double), иначе — символ;
-`nil` → синглтон nil, `t` → символ T. Правило читателя — единственное: `INTERN` приводит
-имя к тому же виду, каким его прочитал бы ридер, так что `(intern "print")` — тот же
-символ, что `PRINT`.
-
-> 🐍 Аналог — фаза tokenizer/parser в CPython, но результат — не `ast.AST`, а cons-ячейки: код и данные одного представления.
+> 🐍 Аналог — tokenizer/parser в CPython, но результат — не `ast.AST`, а cons-ячейки: код и данные одного представления.
 
 ## 19.4 S-выражения
 
-Тегированное объединение (`SExpr`, `src/core/sexpr.hpp`); ячейка — 32 байта (`static_assert`):
+Реальное `Value` из `src/value.zig`:
 
-```cpp
-class SExpr {
-    Tag tag_;       // NIL, CONS, SYMBOL, FIXNUM, FLONUM, STRING,
-                    // FUNC, STRUCT, TENSOR, HLOPROG, PTR
-    union {         // tagged payload
-        struct { SExpr *car_, *cdr_; } cons_;
-        const Symbol *sym_;
-        int64_t fixnum_;
-        double flonum_;
-        struct { const char *data_; size_t len_; } string_;
-        Tensor *tensor_;
-        // FUNC (единый callable-атом): мастер-запись + выбрасываемый код-кэш
-        //   master_ — S-выражение: cons (params body . env) для лисп-функции,
-        //             символ имени для C-примитива (rc-поле)
-        //   code_   — C-fn либо RX-entry (нативная страница, claims по эпохе)
-        struct { void *code_; SExpr *master_; uint64_t packed_; } func_;
-        // STRUCT: дескриптор StructDef + массив слотов (всегда malloc,
-        //         owned-ячейкой; каскад смерти освобождает массив)
-        // HLOPROG: доля программы (storage, понижение, W^X-страница)
-    };
+```zig
+pub const Value = union(enum) {
+    nil,
+    t,
+    int: i64,
+    float: f64,
+    char: u21,
+    symbol: SymbolId,
+    string: Rope,
+    cons: *Cons,
+    func: *Func,
+    tensor: *tensor_mod.Tensor,
+    future: *Future,
+    structure: *StructInstance,
+    result: *Result,
+    ptr: ?*anyopaque,
 };
 ```
 
-**FUNC (единый callable-атом)** — лисп-замыкание, примитив на C и его нативная компиляция: одно значение, один путь вызова. Мастер-запись — S-выражение (инвариант одной формы действует и на callable), нативный код — выбрасываемый кэш поверх неё. Вкус (`is_c_func()`: мастер — атом, иначе лисп) и нативность (`is_jit_prog()`) — свойства того же атома; `type-of` возвращает `FUNCTION` для всех, печать — `#<function ...>`.
+Порядок тегов фиксирован инвариантом (`nil == 0`, `string == symbol + 1`): инлайн-проверки эмиттера используют `tag <= :symbol`. Cons-ячейки неизменяемы и несут спан (файл/строка/колонка); спан есть и у атома-литерала. `nil` — false, «None» и пустой список одновременно; `t` и интернированные символы бессмертны.
 
-**STRUCT** — структура с фиксированным layout: прямой указатель на дескриптор `StructDef` (число и имена полей, таблица методов) и массив слотов. Массив слотов — всегда `malloc`, он owned-ячейкой; каскад смерти освобождает массив и отдаёт rc-ссылки значений (гл. 5, 13). `SET-SLOT` промоутит значение — оно живёт по правилам хранилища (§5.5.5). Печать — `#<struct ...>`, `type-of` — `STRUCT`.
+Структура — **атом**: тег + типизированные слоты, мутируется `set-slot`; гомоиконность относится к коду, а не к каждому рантайм-значению. `Func` — атом: код (JIT-страница или примитив) + захваченное окружение; при escape в stable окружение копируется целиком. `Tensor` — атом: dtype + concrete shape + плоский буфер. `Result`, `Future` и `ptr` — тоже значения.
 
-Все cons-ячейки выделяются в `ConsCellPool`; объекты — в `Scope` с деструктор-трекингом.
-
-Функция: параметры + тело + захваченное окружение (мастер-запись cons `(params body . env)`). Глобальные `defun`/`defmacro`/`defrule` сохраняются в `root_arena_` (stable) — код-как-данные живёт всю программу (гомоиконность рантайма); клон лисп-функции шарит ячейки привязок — живое окружение остаётся живым.
+Память значений — `Store`: bump-регион cons-ячеек и байтов с `mark()/restore()` и детерминированным сбросом scratch. Ни GC, ни reference counting, ни общего аренщика нет.
 
 ## 19.5 Окружение и вычисление
 
-```cpp
-struct EnvFrame {
-    const EnvFrame *parent;   // лексический родитель (nullptr для global)
-    SExpr *bindings;          // alist: ((sym . val) (sym2 . val2) ...)
-};
+`Runtime` держит `world`/`scratch`, плотный массив глобалов `values: []Value` и отдельный `present: []bool` (JIT читает оба напрямую; `values[id]` не читается при `present[id] == false`). В `world` значения копируются глубоко (`cloneToWorld`); `owner == .world` делает повторную копию no-op.
+
+Скоупы создают вызов функции, top-level форма и итерация `while`; не создают `let` (биндит в текущем) и `progn`. На выходе — откат указателя `Store` и освобождение тензорных буферов скоупа, возвращаемое значение копируется в родительский. `setq` перемещает значение в биндинг; `defvar` копирует в stable: `(defvar b a)` — копия, не алиас. Stable никогда не ссылается на scratch; замыкание захватывает локальные биндинги копией, глобалы — live. Явное удаление — только `clear`.
+
+### Кадры вызова и соглашение вызова
+
+Кадры — одна неподвижная bump-арена `frame_area` с указателем `frame_top`, строго LIFO. `takeFrame`/`giveFrame` — сложение/вычитание размера; `replaceFrame` заменяет кадр на месте для хвостового вызова с большим калом; в Debug сверяется указатель. Ёмкость в коде — `1024 * 1024` слотов (~24 МБ адресного пространства, память трогается по мере глубины); рост невозможен, поэтому исчерпание — типизированная ошибка `call depth limit exceeded` с позицией. Машинный стек поднят до 256 МБ (`raiseStackLimit`; `stack_size` в PE), иначе арена не успела бы диагностировать исчерпание.
+
+Соглашение вызова JIT-страницы:
+
+```c
+entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value) void
 ```
 
-`bindings` — это SExpr-alist, а не отдельная структура: окружение выражено тем же
-представлением, что и всё остальное. Переработка окружения (self-hosting) — направление
-развития, а не текущее состояние.
+Кал сам пишет результат (24 байта) в `*out` и делает `ret`. `out` указывает в кадр вызывающего вызывающего и остаётся валидным, пока кал работает, — это снимает главный блокер TCO. Регистры страницы (callee-saved): `rbx` — слоты кадра, `r12` — env замыкания, `r13` — `*Runtime` (пролог кладёт `rt`, инлайн-код читает глобалы без TLS), `r14` — `out`; пролог — четыре push + `sub rsp,8`, эпилог восстанавливает.
 
-Вычисление: атом → сам; символ → поиск переменной; cons → special form или вызов функции.
-Замыкания захватывают цепочку окружений в плоский alist.
+- **Самовызов в хвостовой позиции** (`tail_self`): аргументы считаются во временные слоты, затем копируются в слоты параметров (поэтому `(f b a)` безопасен), `jmp tail_head`. Кадр, traceback и `out` сохраняются; условие — тот же кал по имени, точная арность, без `&optional`/`&rest`.
+- **Хвостовой вызов другой функции** (`emitTailPrepare` → `ql_tail_prepare(frame, name, first, argc, capacity)`): кал разрешается в рантайме (глобал или метод по тегу получателя), потому что при эмиссии тела `Func` второй функции взаимной пары ещё нет; `placeArgs` переносит аргументы, верхняя запись traceback переименовывается, пролог снимается, `jmp entry`. Если кал больше кадра, берётся кадр из арены, старый возвращается, владелец — точка входа, освобождающая цепочку через `Runtime.tail_frame`. Промах → обычный `ql_call_global` с прежней диагностикой. Ёмкость кадра передаётся `mov r8d, imm32` и патчится после эмиссии тела.
+- `Runtime.enterTailScope`/`leaveTailScope` окружают каждый вход в JIT-код: вложенная страница `eval` не может освободить чужой кадр.
+- Проверено: взаимная рекурсия на 1M вызовов в постоянном числе кадров, `eval` внутри взятого кадра, бэктрейс без исчезнувшего вызывающего, `catch-error`.
 
-**Live-глобалы.** Замыкание не захватывает глобальный кадр: глобалы резолвятся в момент
-вызова, как в Common Lisp, — переопределённый `defun` виден живому замыканию. Захватываются
-только локальные кадры (`let`, `let*`, тела циклов), каждый со своей ссылкой на пару.
-Побочный эффект, о котором стоит знать прямо: **лисп-обёртка с именем примитива затеняет
-сам примитив** (символы регистронезависимы) — `(defun sample (logits) (SAMPLE logits))`
-вызовет сам себя. В stdlib тела таких обёрток переведены на другие имена (`sleep` →
-`WAIT-MS`, `string-contains` → `STRING-INDEX`).
+Регистровые аргументы (этап D плана) измерены и отклонены: фиксированная цена вызова ~10.6 нс против 1.3–1.5 нс на аргумент; кал всё равно спиливает значение в слот. Вместо этого — дешёвая bump-арена кадров.
 
-### Ошибки: структуры от трейта ERROR
+### Ошибки и source maps
 
-Ошибка — не строка, а **структура от трейта `ERROR`** с полями `message`, `cause`,
-`traceback` (гл. 13, 15):
+`(:result T)` = `ok T | err Error`; `throw : :a → :never`; `catch-error : (:func () T) → (:result T)`. `Error` — структура `message :string`, `cause :(:option (:struct Error))`, `traceback :(:list CallFrame)`; кадр — `(name file line form)`. Ошибки компиляции/типа — не `Error`-значения, а отказ с диагностикой со спаном.
 
-- `message` — текст ошибки;
-- `cause` — рекурсивная ссылка на ошибку, пойманную под ней: новая ошибка встаёт
-  поверх словленной старой и неявно образует цепочку; у корневой ошибки `cause` = `nil`;
-- `traceback` — список кадров вызовов (см. ниже).
-
-Методы трейта читают поля: `error-message`, `error-cause`, `error-traceback` — обычные
-функции. Арифметические ошибки (`(/ 1 0)` → «division by zero») — та же структура.
-`catch-error` при успехе возвращает пару `(T . результат)` (`car` → `T`, `cdr` →
-результат), при ошибке — структуру: `car` от структуры даёт `nil`, поэтому старая
-проверка «была ли ошибка» по `(car e)` продолжает работать. Отчёт по ошибке ходит по
-цепочке `cause` от корня до листа, печатая `message`; `PRINT-BACKTRACE` печатает
-бектрейс. JIT и интерпретатор дают одну и ту же ошибку (паритет).
-
-### Теневой стек вызовов и бектрейс
-
-`traceback` ошибки — список **кадров-структур** с полями `name` (символ), `file`
-(строка), `line` (число), `form` (форма-список); порядок — oldest → newest: внешний
-вызов первым, последний кадр — точка ошибки. Стек собирает теневой стек вызовов; он
-ведётся всегда, его стоимость входит в замеры методов.
-
-- Кадр из интерпретации несёт **исходную форму вызова**: макрос показан до развёртки
-  (голова кадра — сам макрос).
-- Кадр из JIT-кода несёт **мастер-форму вызываемого**: у нативного кода нет
-  unwind-таблиц, стек собирается той же нитью, что и bail-перезапуск (мастер-форма
-  рядом).
-- Хвостовая рекурсия (TCO) схлопывает промежуточные кадры — один кадр на хвостовой
-  цикл (как в Scheme; это контракт, а не потеря). Не-хвостовая рекурсия растит кадры
-  по-настоящему.
-- Ошибка внутри построения бектрейса не ломает отчёт.
+Runtime-ошибка: хелпер зовёт `bailAt(@returnAddress(), msg)`, сообщение сохраняется в `Runtime.error_message`, позиция — в `error_location`. Source map — `CodePage.map: []MapEntry{start,end,span}` плюс имя файла: запись на каждую cons-форму, вложенные формы дают вложенные записи, `lookup` берёт самую внутреннюю, ~24 байта на форму. Адрес возврата указывает **после** `call`, поэтому lookup идёт по `offset-1`. CLI печатает `file:line:col: message`. Ошибки не разматываются через нативный C-стек, только через JIT-кадры.
 
 ## 19.6 Special forms
 
-Из `sym_*` в `src/eval/interpreter.cpp`:
+Ядро чекера и эмиттера: `quote`, `if`, `progn`, `let`, `setq`, `while`, `lambda`/`\`, `defun`, `defvar`, `and`, `or`, `cond`, `the`, вызовы; `funcall`/`apply`, `read-from-string`/`write-to-string`; `defmacro`, `macroexpand-1`, `macroexpand`, `macroexpand-all`, `gensym`; `defstruct`, `slot-value`, `set-slot`, `deftrait`, `impl`; `import`, `import-from`; `defgraph`, `defuse`; `ns-if`; `tensor`; `throw`, `catch-error`; `eval`. Примитивы (`+ - * /`, сравнения, `car`/`cdr`/`cons`, `print`, `map`/`filter`/`reduce`, тензорные ядра, `ffi-load`/`ffi-defun`, файловые и QSRD-примитивы, `future`/`await`) живут в реестрах, а не в спецформах.
 
-`QUOTE, IF, PROGN, LAMBDA(\), LET, LET*, DEFUN, DEFUSE, DEFUSE!, DEFMACRO, MACROLET, DEFVAR, SETQ, COND, WHILE, AND, OR, BACKQUOTE, IMPORT, THE, GENSYM, MACROEXPAND, MACROEXPAND-1, FUNCALL, APPLY, DEFSTRUCT, IMPL, TRAIT, MODULE, SLOT-VALUE, SET-SLOT, MATCH, UNIFY, SUBST, AMB-LET, REQUIRE, AMB-COLLECT, ASSERT-FACT, RETRACT-FACT, DEFRULE, QUERY, RUN-RULES, DEFINE-COMPILER-MACRO, HLO-START, NS-IF, NS-GRAD!, TENSOR, FUTURE, PMAP` — и **примитивы** (арифметика, тензоры, autograd, HLO, FFI, IO, data).
+- `defun`/`lambda` требуют аннотаций параметров и возврата; `&optional` внутри тела — `(:option T)`, `&rest` — `(:list T)`; `let` — параллельные биндинги; `let*` отсутствует. Пользовательских перегрузок нет: повторный `defun` с тем же именем — ошибка. `:any` запрещён.
+- Сигнатуры всех литеральных top-level `defun` публикуются **до** проверки первой формы (`declareFunctions`), поэтому прямая ссылка вперёд и взаимная рекурсия типизируются; определение исполняется по порядку, вызов до определения — runtime-ошибка.
+- Тела `defgraph`/`defuse` раскрываются отдельно (`Session.expandBody`) и клонируются в world: иначе тело `defuse` висело бы на scratch. Тело макроса проверяется в живом окружении (чекер берётся из `Runtime.checker`), поэтому макрос может звать хелперы модуля.
+- `eval : :syntax → :a` — проверяемый каст; `:a` выводится из контекста; форма заново проходит expand/typecheck/emit, несовпадение типа — runtime-ошибка. Единственная документированная граница статики.
 
-`AND`/`OR` — гибрид: в позиции головы формы это ленивые спецформы с коротким замыканием, а как значение (`(apply and ...)`) — n-арные функции. `HLO-START` — special form, ограничивающая конфиг и трассировку своим телом (гл. 10). `NS-CONFIG` — обычный примитив чтения/записи конфига (гл. 14.8). Макрос `deftape!` живёт в `stdlib/core.qlsp` поверх примитива регистрации (гл. 7.8).
+### Модули
 
-`DEFSTRUCT` задаёт структуру (имя + поля + заявленные трейты), `IMPL` — методы типа
-(обычные функции, диспетч по первому аргументу), `TRAIT` — контракт из методов
-(имя + арность, необязательные дефолтные тела); `SLOT-VALUE`/`SET-SLOT` читают и пишут
-поля. Конструктор и диспетч методов — лисп-функции-обёртки над примитивами
-`STRUCT-NEW`/`STRUCT-INVOKE` (обычные FUNC-атомы). Семантика — гл. 13.
-
-### Модули: MODULE-заголовок и рекурсивные зависимости
-
-Первая форма модуля — **`(MODULE name (dep...))`**: явная опись зависимостей. Импорт
-(`IMPORT`/`IMPORT-FROM`) грузит зависимости **рекурсивно в порядке описи**:
-зависимости раньше тела модуля, порядок детерминирован; имена зависимостей видны
-`import-from` после загрузки. `IMPORT` берёт и встроенные модули (`"core"` и далее),
-и файловые (точки — пути: `tests.mod` → `tests/mod.qlsp` от CWD); `IMPORT-FROM`
-вычисляет модуль целиком, но в глобалах оставляет только запрошенные имена
-(внутренние вызовы живут в захваченном окружении).
-
-- Цикл зависимостей — внятная ошибка с цепочкой участников (не тихий no-op с
-  частично инициализированным модулем);
-- отсутствующая зависимость — ошибка, называющая виновника;
-- `MODULE` не первой формой модуля или второй заголовок — ошибка;
-- повторный импорт уже загруженного модуля — no-op.
+Модуль — файл с `(export name …)` в конце; приватные хелперы не экспортируются. `(import m)` открывает все экспорты, `(import-from m (a b))` — только перечисленные, каждое имя проверяется по `module_exports`; повторный импорт идемпотентен, конфликт — `ImportConflict`. Приватные id создаются через `SymbolTable.internPrivate`: имя лежит в `names`, но не в `map`, поэтому `MODULE::NAME` нельзя набрать в исходнике. `Session.expose` алиасит публичное имя на приватное. `load`/`import` обрабатываются только на top-level. `core` — предустановленный prelude, остальные модули грузятся лениво.
 
 ## 19.7 Тензорная подсистема
 
-```text
-Tensor: dtype (F16/F32/F64/I32/I64/U8), shape, strides, numel,
-        data (TensorBufferPool — exact-size, 0% перерасхода),
-        requires_grad, grad, grad_node (лента), m/v/step (Adam)
-```
-
-- Тензор — **одно выделение [заголовок | данные]** с единственным разрушителем: payload
-  принадлежит объекту и переживает откат региона независимо от ячеек (§5.5.6).
-- Поэлементные операции — SIMD: AVX2 (8×f32) на x86_64, NEON (4×f32) на ARM. Ядра
-  работают по сырым указателям (`src/core/simd.hpp`: `sum_ps`/`max_ps`/`scale_ps`/`exp_ps`
-  с полиномом AVX2), диспетчеризация идёт по layout, одометр работает без аллокаций.
-- `MATMUL` — `cblas_sgemm` (OpenBLAS): транспонирования выполняются внутри GEMM
-  (флаги `atrans`/`btrans`), backward-логи и шаги SGD/ADAM работают на сырых указателях.
-- `reshape`/`transpose` — глубокие копии: writable views нет. Read-only окна `T-ROWS`/`T-SLICE` (и строковые `STRING-VIEW`/`STRING-REF`) — алиас с владением по счётчику; скретч-владелец при создании окна повышается, escape в stable материализует копию (гл. 5.5.8, 6.4).
-- `TensorBufferPool`: exact-size free list + кэш по (shape, dtype) — повторяющиеся
-  размеры (батчи, активации) переиспользуются за O(1). Пул ограничен по объёму: при
-  переполнении лишние буферы уходят системе, а не удерживают RSS за мёртвыми данными.
-- F16: `launch_*_half` через `_Float16` (F16C на x86_64); matmul аккумулирует во float.
-- `while`: каждая итерация живёт в собственном scope (`checkpoint()`/`restore()`),
-  результат тела — в паре ping-pong scratch-скоупов, в root продвигается один раз на
-  выходе. Tape-графы, не закрытые `GRAD!`, сбрасываются на границе формы — незакрытые
-  графы не копятся в памяти формы.
-- Утечки памяти в ядре ловит soak-харнесс (`tests/memory_soak.qlsp` + `bench/leak_watch.py`,
-  VmRSS по `/proc`).
-
-## 19.8 Autograd
-
-Узел ленты (`src/tensor/gradient_tape.hpp`):
-
-```cpp
-struct GradNode { Tensor *result;
-                  std::vector<Tensor*> inputs;
-                  std::function<void(Scope&)> backward_fn; };
-
-class GradientTape {  // thread_local singleton
-    static GradientTape& instance();
-    void push(GradNode* node);
-    void backward(Tensor* loss, Scope& arena, blocked_set_t* blocked = nullptr);
-    void clear();
+```zig
+pub const DType = enum { f16, f32, f64, u8 };
+pub const Owner = enum { scratch, world, pool };
+pub const Tensor = struct {
+    dtype: DType,
+    shape: []usize,          // конкретная форма
+    storage: Storage,        // union(DType) { f16/f32/f64: []T, u8: []u8 }
+    owner: Owner = .scratch,
+    requires_grad: bool = false,
 };
 ```
 
-`backward` идёт по dataflow-графу в reverse-topo (потребители раньше производителей) через
-`result → producer`-карту, накапливая `+=` градиенты в `inputs`. Журнал ленты доступен из языка как `(TAPE-FORM)` — записи `(OP результат (входы...) payload)`, новые первыми; рёбра — те же объекты тензоров (идентичность по `EQ`), поэтому `GRAD!` пишет в поле того же `Tensor`, что видит программа.`
+Тензор — атом: dtype + concrete shape + плоский буфер. Литерал `(tensor ((1.0 2.0) (3.0 4.0)))` всегда `:f32`, прямоугольность проверяется; `zeros`/`ones`/`randn` требуют dtype-ключ и литеральную форму. `randn` — xorshift64* в `Runtime`, не криптостойкий. Eager-тензор живёт в scope-арене, `PARAM`/`defvar` — stable, `TensorBufferPool` — только HLO.
 
-Нейросимвольные `NS-IF`/`NS-GRAD!` (см. гл. 14) добавляют «вину»: STE-градиент для
-роутера, блокировка ошибочных ветвей через `blocked_set_t`.
+Быстрые пути: `elementwise`/`map` — `@Vector` 8×f32 / 4×f64 без f64-раундтрипа; `matmul` по `i-k-j` с `@Vector`; reductions блоками — 8 независимых f64-полос, фиксированный порядок сведения (результат детерминирован, но не «слева направо»). `u8`-деление запрещено статически; `:u8` в `tsum`/`tmax` даёт `:fixnum`.
 
-### Контракт ленты
+`TensorBufferPool` — exact-size free lists по `(len, alignment)`, реализация `std.mem.Allocator`; буферы переиспользуются, финальный выход копируется в scratch. `Graph.peak_bytes` — оценка пика, жёсткий cap не enforced.
 
-1. **Узлы принадлежат tape.** Аллоцируются в heap, удаляются в `clear()`. Узел не
-   переживает свою ленту и не должен использоваться после её очистки.
+Устройства нет: `Owner` — `scratch`/`world`/`pool`, `device` в перечислении отсутствует, все ядра — C-ABI функции на x86-64 с AVX2. Writable views и `t-slice` отсутствуют; `reshape`, `transpose`, `t-rows`, `t-select-rows`, `t-column` копируют. Печать — `#<tensor dtype (dims)>` без содержимого.
 
-2. **`defvar` промоутит промежуточный тензор.** `defvar`/`setq` клонирует тензор в
-   stable-scope и перенаправляет ребро `result` tape-ноды на stable-копию. Градиент течёт
-   в тензор, который видит пользователь.
+## 19.8 Autograd
 
-3. **`reset_scratch` «запечатывает» незакрытые графы.** Если форма верхнего уровня
-   завершилась без `GRAD!`, и какие-то tape-узлы ссылаются на scratch-тензоры, эти тензоры
-   один раз клонируются в stable, и рёбра переписываются. Обучающие циклы ничего не платят
-   (tape пуст после каждого `GRAD!`).
+`(param t)` помечает float-тензор `requires_grad` (`:u8` запрещён); флаг переживает `cloneToWorld`. `defgraph` трассирует тело один раз на нулевых placeholder-тензорах: управление статическое, `tref`/`tset!` в графе не поддерживаются, константы (`tensor`, `zeros`/`ones`/`randn` в теле) — stable. Вызов компилируется в `(%GRAPH-RUN gid ret arg…)`.
 
-4. **Биндинги не алиасят литералы.** `let`/`bind_and_eval` копируют скалярные значения
-   (fixnum/flonum/symbol) в свежие ячейки — `setq` больше не мутирует исходные литералы
-   в коде.
+`ql_graph_run` сохраняет последний запуск в `Runtime.last_run` (сбрасывается в конце top-level формы); forward с `frame.retain = 1` не освобождает активации — все лежат в per-run `TensorBufferPool`. `(grad! loss)` сеет единицы формы выхода и идёт по узлам с конца, читая forward-значения из `run.values` — **без replay**, O(n) по узлам и O(n) по активациям до `grad!`/конца формы. Градиенты накапливаются в scratch; для `param`-входов копируются в stable и кладутся в `Tensor.grad`; `(grad-of t)` возвращает stable-градиент или нули той же формы/dtype.
 
-5. **Adam-состояние живёт на параметре.** `m`/`v`/`step` аллоцируются в stable-scope на
-   самом параметре: это персистентное состояние оптимизатора, обязано переживать
-   checkpoint/restore итераций `while` (иначе — висячие указатели и NaN).
+Backward-правила: `add`, `sub`, `mul`, `div` (reduce по broadcast), `neg`, `matmul`, `reshape`, `transpose`, `relu`, `exp`, `log`, `tanh`, `softmax`, `sum`, `mean`, `max`; `sum` размножает grad, `mean` делит на число элементов, `max` отдаёт grad всем максимумам. Backward компилируется в обратную последовательность вызовов `ql_bwd_*` (x86-64, W^X); интерпретатор — fallback при ошибке компиляции.
 
-6. **HLO/NS-прокси — строковые хендлы.** Биндинги копируют скаляры, а fixnum-прокси при
-   копировании теряет идентичность (ключ `trace_nodes_`). Поэтому прокси — строки
-   `"#hlo-node:<id>"`: идентичность переживает и копирование биндинга, и promote-клон.
-   `HLO-COMPILE` на чужом хендле — внятная ошибка вместо падения.
+**Ограничения.**
 
-7. **Guard времени жизни градиентов.** При входе в `backward()` на каждый нодовый тензор
-   регистрируется guard (`Scope::track_dtor` + `Tensor::clear_grad`): при смерти
-   scratch-региона `->grad` честно обнуляется — следующий backward не пишет в
-   переиспользованный пул.
+- `grad!` работает только с последним запуском графа в текущей top-level форме; не проверяет, что аргумент — именно его выход.
+- Нет `tref`/`tset!`/`pow`/`sqrt`/`sin`/`cos`/`atan`/`argmax` в графе; reductions в графе — только float; `defgraph` с `:fixnum` фактически недостижим.
+- Нет вложенных `defgraph`, рекурсии и data-dependent control flow; нет автоматического fusion/CSE/DCE — fusion только через `defuse`.
+- Параметры, не участвовавшие в последнем запуске, сохраняют старый градиент; `grad-of` никогда не считанного параметра — нули.
+- `clear` имени снимает callable, но граф/JIT-страница живут до teardown.
 
-8. **Градиент не переживает границу формы.** Градиент аллоцирован в scratch-арене формы и
-   к её концу уже мёртв, поэтому значение после границы честно нулевое, а на stderr
-   печатается предупреждение о непрочитанных градиентах. Прочтением градиента считается
-   `GRAD-OF`, `SGD-STEP` и `ADAM-STEP` — они снимают параметр с учёта.
-
-9. **Шаги оптимизатора детектируют нечисловые значения.** `SGD-STEP` и `ADAM-STEP`
-   замечают NaN/Inf и не уводят веса в `inf` молча.
-
-10. **Сравнение плавающих в release ненадёжно.** Release собирается с `-ffast-math`, а он
-    включает `-ffinite-math-only`: компилятор вправе считать, что NaN не бывает, и
-    сворачивает `a == b` в `!(a<b) && !(a>b)`, что для NaN истинно. Поэтому конечность
-    проверяется примитивом `(FINITE? t)` (битовая проверка), а числовые пороги в тестах
-    ставятся выше baseline вырожденного решения.
-
-### Смежные механизмы
-
-- **Tail-call optimization.** Self-хвостовой вызов пере-биндит кадр (параметры копируются
-  в heap-стор, итерация освобождается через `restore`) вместо роста стека. Гейт: если
-  итерация оставила живые tape-узлы, TCO для неё выключается — обычная рекурсия держит кадр.
-  `let`/`let*` разворачиваются в транполине до 8 уровней, глубже — обычный кадр.
-- **Кэш раскрытия макросов.** `MacroExpander` кэширует раскрытие на форму-источник (хит по
-  содержимому), инвалидация — на `defmacro`/`define-compiler-macro`; `macrolet`-протяжения
-  вне кэша.
-- **DEBUG-TRACE.** Кольцевой буфер на 4096 записей (`src/core/trace.{hpp,cpp}`) с
-  категориями `scope`/`clone`/`expand`/`macro`; примитивы `DEBUG-TRACE`, `TRACE-STATS`,
-  `TRACE-DUMP`, `TRACE-CLEAR`, переменная окружения `QUALISP_TRACE`. Трейс отвечает на
-  вопрос «как сюда пришли», тогда как `(mem-report)` — «что стало» (гл. 5). Выключенный
-  трейс стоит один relaxed load, сам буфер не течёт.
-- **Асинхронный слой.** Пул воркеров с интерпретатором на каждом воркере, future'ы и
-  каналы (`FUTURE`/`AWAIT`/`CHAN` — спец-формы, `stdlib/async.qlsp` — форма интерфейса).
-  Мир задачи — снимок: глобалы общие и только для чтения, локальные переменные вызывающего
-  копируются в задачу; форма задачи — копия future. Пул по умолчанию последовательный
-  (один воркер); `QUALISP_THREADS` поднимает число воркеров на риск оператора (гонка при
-  трёх и более). Многоядерность программы живёт в тензорных кёрнелах (OpenMP + OpenBLAS);
-  подробности и контракт — гл. 15.12.
-
-## 19.9 HLO-пайплайн
+## 19.9 HLO-пайплайн и copy-and-patch JIT
 
 ### Узлы и операции
 
-Граф из узлов `HloOp` (см. `src/hlo/graph.hpp`): `PARAMETER, CONSTANT, DOT, ADD, MUL, RELU,
-FUSION, OUTPUT, LOOKUP, ARGMAX, SOFTMAX, COMPOSITE, WEIGHTED_LOOKUP, ROUTE, TRANSPOSE,
-ATTENTION, EXP, DIV, SUM, MAX`.
-ROUTE-узел описывает только программу: ветви-подграфы внутри узла и OR-overlap-метки; то,
-что оставляет прогон, живёт на программе (§19.9). Разрешение вины — OR-aware, взятая
-ветвь выигрывает: `resolve_correct` у узла и у tape-роутера считают одинаково.
-FUSION несёт дерево выражения над листьями `(IN k)` (словарь `ADD/MUL/RELU/ABS/NEG/CLAMP01/COPY/TANH`),
-а `EXP/DIV/SUM/MAX` — общие узлы с payload-маской осей: так любая Lisp-композиция даёт
-корректный граф. `ATTENTION` — fused-узел, в который сворачивается `DOT(SOFTMAX(...), v)`.
+`Op` из `src/hlo/graph.zig`: `constant, identity, add, sub, mul, div, neg, matmul, reshape, transpose, relu, exp, log, tanh, softmax, sum, mean, max, ns_if`. Узлы с арностью > 2 разворачиваются в бинарные. `ns_if` несёт подграфы ветвей (`Graph.subgraphs`, по одному параметру-payload на ветвь). Граф — производный одноразовый артефакт, мастер — S-выражение `defgraph`.
 
-### Форма графа — мастер, `HloGraph` — кэш понижения
+### Компиляция и пул
 
-`HloProgram` (`src/codegen/hlo_codegen.hpp`) держит две разные вещи:
+`Graph.compiled` — ленивый `CompiledGraph`; второй вызов — без ожидания, первый ждёт job (`mutex` + `Condition`). `N = min(cpu_count, 8)` воркеров компилируют независимые графы; `Session` создаёт пул лениво, если есть `io`, иначе синхронно. Каждый compiled-вызов создаёт свой `TensorBufferPool`: один граф можно вызывать параллельно из futures без mutex. Ядра C-ABI — в `src/hlo/kernels.zig`, backward — в `src/hlo/bwd_kernels.zig`, узел NS — `ql_hlo_ns_if`; f64/f32/u8 ядра, SIMD AVX2.
 
-| поле | что это | кто читает |
-|------|---------|-----------|
-| `graph_form` (`SExpr*`) | **мастер-копия программы**, живёт в `storage` и умирает с программой | `GRAPH-DATA`, образ на диске, понижение |
-| `lowered` (`HloGraph*`) | производный одноразовый артефакт | эмиттер, фоллбэк, `GRAPH-RUN-PASSES`, `HLO-ROUTE-GRAD!` |
-
-`program_lowered(hp, arena, interp)` строит кэш из формы при первом обращении и заканчивает
-развёртыванием COMPOSITE. Источником правды форма не перестаёт быть: кэш можно выбросить и
-получить то же самое. Обратной записи нет — держать два представления в согласии нечего,
-потому что нечего рассинхронизировать.
-
-### Проходы на форме
-
-CSE, DCE и FUSION работают на форме как `SExpr → SExpr`. Идентичность узла — это его `id`,
-а не указатель, поэтому замена потребителей есть переписывание списка чисел, а слитый
-дубликат выбрасывается прямо при эмиссии формы.
-
-Форма узла: `(OP id (shape) (inputs) payload dtype)` — шестой элемент несёт dtype (символом;
-старые формы без dtype читаются как F32). Константы в форме — **атомы-тензоры**, а не
-списки float: сохраняется dtype, и round-trip точен для любого dtype. Имена операций берутся
-из одной таблицы `hlo_op_names` в обе стороны, так что добавление операции — одна строка.
-
-**FUSION** сливает поэлементные операции в узел с **деревом выражения** над листьями `(IN k)`
-(словарь `ADD/MUL/RELU/ABS/NEG/CLAMP01/COPY/TANH`): дерево выражает ветвление и точки
-соединения, поэтому `(T+ (c3 x) (c3 x))` сливается в один узел. Ограничения стенсила:
-≤ 8 одновременно живых ymm и ≤ 5 листьев.
-
-**dtype** живёт и в `HloNode`, и в форме. `fits_stencil` пропускает в стенсил только F32 и
-I32 — **f16 уходит в интерпретаторный фоллбэк** (в стенсиле f16 портил данные без ошибки).
-Значения в фоллбэке пишутся через `get_float`/`set_float`, поэтому тихой порчи dtype нет;
-`ARGMAX` возвращает F32.
-
-### Память фоллбэка
-
-- Буферы узлов освобождаются **по последнему потребителю**: выделение ленивое, значение
-  узла считается один раз.
-- Свёртка FUSION пишет в буфер узла (накопление in place) вместо выделения тензора на
-  операцию: прирост пика RSS фоллбэк-графа со свёрткой из 7 операций на 2048×2048 f32 —
-  ~50 МБ вместо ~390 МБ.
-- Состояние прогона ROUTE живёт **на программе** (`RouteRunState`), а не в узле: `HloNode`
-  описывает только программу, понижение можно перестроить, backward не теряется (состояние
-  адресовано по id).
-- Константы трейса владеют своими байтами: константа клонируется в хранилище, живущее
-  столько же, сколько сессия трассировки; `seal_graph_constants` копирует из хранилища,
-  переживающего граф.
-- Под трассировкой рекурсия **не хвостовая** — иначе откат scratch освобождал узлы графа,
-  и `HLO-COMPILE` резолвил вход в средний узел графа.
-
-### Стенсильный эмиттер
-
-Кодоген (`src/codegen/hlo_codegen.cpp` → `hlo_stencil.cpp`): **единый стенсил-эмиттер**
-`compile_hlo_stencil` — один проход по графу выписывает байтовые AVX2-стенсилы с «дырками»
-(imm-формы, rel32, movabs-адреса хелперов), патчит их и копирует в W^X-страницу процесса.
-Кернел — C-ABI-функция `void fn(float** params, float* out)`; узел `DOT` → `call cblas_sgemm`
-(адрес прошивается movabs-патчем). Подмножество: PARAMETER, CONSTANT, DOT, ADD/MUL/RELU,
-FUSION-деревья, SOFTMAX, ARGMAX, LOOKUP, WEIGHTED_LOOKUP, ATTENTION, TRANSPOSE; фоллбэк — для
-ROUTE, COMPOSITE, `EXP/DIV/SUM/MAX` и несовместимых форм. Промежуточного IR нет — LLVM-путь
-отсутствует. Стенсилы портированы на Win64 ABI; у страниц нет `.pdata`, поэтому исключение
-не должно пересекать нативный кадр (фасады `call_value`/`rest_list` ловят его и возвращают
-bail-токен).
-
-Кэш — in-process по fingerprint (версия эмиттера + shape-ключ + dtype). Дискового кэша нет.
-Fallback: граф вне компилируемого подмножества → интерпретация клонированного графа
-(`HloGraph::clone()`); `HLO-RUN` защищён arg-count guard (ошибка вместо чтения за границей).
-
-### Граф как данные
-
-`GRAPH-DATA` / `GRAPH-FROM-DATA` — S-выражение с ROUTE-ветвями и константами (точный
-круговой рейс print→read→print), `GRAPH-RUN-PASSES` — оптимизатор из Lisp: `(CSE DCE FUSION
-OPT)`. `GRAPH-DATA` отдаёт копию формы и **не строит понижение вовсе**: инспекция не должна
-зависеть от артефакта понижения. Range-кернел `fn_range(params, out, start, end)` строится в
-той же странице (гл. 10.6).
+`defuse` — отдельный путь: тело — одно elementwise-выражение (`+ - * /`, унарный `-`, `relu`, числа, параметры; без `let`, вызовов и тензорных литералов), все тензорные параметры — `:f32` одной конкретной формы, скалярные — `:flonum`/`:fixnum`. Первый eager-вызов компилирует скалярный f32-цикл x86-64 без промежуточных тензоров: AVX2 по 8 f32 + scalar-tail, константы в `CompiledFused.constants`. Внутри `defgraph` вызов `defuse` инлайнится в `let` перед трассировкой, поэтому forward/backward идут обычными HLO-узлами.
 
 ### Copy-and-patch JIT (`src/jit/`)
 
-Горячие замыкания компилируются тем же методом — без IR и без LLVM; детали — гл. 20 и
-`src/jit/CODE.md`. Ключевые факты для экскурсии:
+Конвейер: `Program (root) → typecheck → Emitter.compile(form) → CodePage → CodePage.run() → Value`. Контракт:
 
-- **ABI страницы**: `SExpr *entry(SExpr **argv, size_t argc, Interpreter *interp)`; локали —
-  слоты `[rbp - 8*(slot+1)]` по 8 байт (boxed `SExpr*` или raw int64/double).
-- **Один проход по S-дереву**: инлайнятся `if`/`let`/`while`/`setq`/`progn`, арифметика и
-  сравнения цепочками на любом числе аргументов (N-ary; длинные цепочки — стек-буфер +
-  AVX2), константная свёртка (`(+ 1 2 3 4)` — никакого кода); `&optional`/`&rest` и
-  точечный хвост параметров (guard по числу аргументов, nil-дефолты, сборка хвоста);
-  `slot-value`/`set-slot` (индекс поля по дескриптору + guard типа ячейки, динамическое
-  имя поля — фасад по имени). Вызов метода с доказанным типом `self` разрешается на
-  компиляции и идёт прямым `call` мимо таблицы методов. Всё остальное — `lookup_var` +
-  `call_value`, поэтому рекурсия jit-to-jit работает.
-- **Точечная эпоха метода**: переопределение метода (`IMPL`) поднимает версию метода, и
-  статические вызовы видят новую реализацию сразу — точечно, без глобального сброса
-  страниц (`invalidate_all` остаётся за макросами).
-- **Bail-блок**: несовпадение типа или неизвестная ситуация → возврат bail-токена →
-  интерпретатор повторяет тело по master-копии (transaction-retry). Хук — `Interpreter::apply`.
-- **Жизнь страницы: рефкаунт обёрток.** Страница живёт, пока жив хотя бы один исполняющий
-  её обёртка; реестр страниц ключует претензии (claims) эпохой рождения страницы, поэтому
-  отпускание устаревшей обёртки после `DISCARD-JIT` — no-op, а не сброс чужой претензии.
-  Смерть последней обёртки освобождает страницу и снимает её кэш-записи. Клон функции
-  делит страницу и берёт свою претензию; `jit-pages` в `(mem-report)` — живые страницы.
-- **Эпоха и heal**: любое `defmacro`/`define-compiler-macro` → `jit::invalidate_all()` (все
-  страницы сбрасываются); stale-обёртка пересобирается после 64 интерпретируемых вызовов,
-  засевая решётку типов наблюдаемой сигнатурой (`JIT-SIG`).
-- **Сериализация компиляции между потоками**: страница публикуется в общий список и общий
-  кэш, поэтому компиляция под асинхронным слоем берёт блокировку один раз на
-  компилируемую функцию (рекурсивно — компиляция может компилировать вызываемое).
-- **Только SysV и Win64 x86-64** — стенсилы выписаны под эти две ABI.
+```zig
+emit(form, env, expected_type) -> Code {
+    bytes,
+    relocations,
+    bail_sites,
+    source_map,
+}
+```
 
-## 19.10 Neuro-Symbolic Router
+Эмиттер копирует байтовые стенсилы, патчит адреса хелперов (imm64) и rel32-переходы; дерево в момент исполнения не читается. W^X: `mmap`/`mprotect` POSIX, `VirtualAlloc`/`VirtualProtect` Windows; страницы лежат в `StableMemory`, выбрасываются и пересобираются из мастер-формы `Func`. `jit_abi.call` (`src/jit/abi.zig`) — `.c` (= SysV) на Linux, `.x86_64_sysv` на Windows: Zig порождает SysV-функции внутри PE, поэтому байты JIT-страниц идентичны на обеих ОС. `JitCache` ключуется по узлу формы; `clear` снимает глобал, но страницы живут до teardown.
 
-`src/ns/route.{hpp,cpp}`:
+Быстрые пути: литералы, копия слота (16+8 байт), чтение глобала (`id < present.len` + байт `present`), запись глобала (только immediate `tag ≤ :symbol`, не-worker, существующий id), promotion в `while`, откат итерации (`Emitter.mayAllocate`), инлайн fixnum-арифметики и сравнений с guard'ом тега и bail-блоком на прежний helper. Смещения считаются через `@offsetOf`: переезд поля ломает сборку, не семантику.
 
-- `RouteHop` — одна символьная развилка: `decision_logits`, `batch`, `taken[]`, `correct[]`,
-  `branch_covers[]`, диапазон tape-узлов.
-- `RouteHop::resolve_correct(label, taken)` — case-insensitive; OR-aware: taken-ветвь
-  первая; если она покрывает label → маршрут верный (виновен лист).
-- `Router` — упорядоченные хопы от корня к листу с depth-трекингом.
-- `GuiltDetector::detect(router, labels)` → `GuiltVerdict { kind, guilty_hop, per_sample_hop,
-  per_sample_kind }`.
-- `NS-IF` (`do_ns_if`) выбирает ветвь per-sample по argmax и записывает хоп; смешанный батч
-  исполняется по-настоящему: каждый уникальный взятый вариант ветви — на полном батче,
-  результат собирается построчно (строка `s` — из ветви `taken[s]`), градиент строки уходит
-  только в свою ветвь.
-- `NS-GRAD!` (`do_ns_grad`) блокирует tape-узлы виновных ветвей, добавляет
-  softmax-weighted STE в `decision_logits->grad`.
-- Роутер работает и поверх макро-слотов (`ns-route`/`ns-route-sample`/`ns-route-index`):
-  NS-RL-движок blackit живёт на уровне stdlib + примитивов `SAMPLE`/`EVAL-SANDBOXED` —
-  гл. 14.10.
+Ограничения: deopt не реализован — страницы не специализированы, helper-путь и есть generic-путь; guard'ы ставят `RuntimeError`. Struct-инстансы и `Result` живут до `Runtime.deinit`. `eval` возвращает `:syntax`/`:atom` консервативно; конкретика через `the`.
 
-## 19.11 LSP
+## 19.10 Нейросимволический роутер
 
-`qualisp-lsp` (`src/lsp/server.cpp`, отдельная цель CMake без линковки движка) — полноценный
-Language Server, автономный (JSON-RPC over stdio, встроенный JSON-парсер с честным
-анескейпингом `\n \t \r \b \f \uXXXX`):
+`src/ns/`:
 
-- **Ядро**: двухпроходный сканер S-форм, повторяющий конвенции ридера (строки с
-  экранированием, `;`-комментарии, диспетч-макросы `#' #(` `#\`, quote/quasiquote/comma);
-  инкрементальная синхронизация (`change: 2`) через офсетный сплайсинг — без перечитывания
-  документа.
-- **Диагностики**: незакрытая форма (с позицией открывающей скобки), лишняя `)`, незакрытая
-  строка — точные диапазоны; семантическая диагностика арности известных `defun`/`defmacro`
-  (только превышение — недостающие аргументы движок связывает с `nil`); Lisp-1 lint (имя
-  функции в позиции значения без `#'`).
-- **Воркспейс-индекс** на initialize: скан `*.qlsp` (глубина ≤ 8, кап 500 файлов,
-  пропуск `.git`/`build*`/`node_modules`/`.cache`); `workspace/didChangeWatchedFiles`
-  обновляет индекс.
-- **Навигация**: scope-aware `definition`/`references`/`rename` — каждое вхождение
-  разрешается в тождество связывания (параметры с `&optional`/`&rest`/`&key`, точечный
-  хвост, типизированные `a: Int`; `let`/`let*`, `do`/`do*`, `dolist`/`dotimes`,
-  `multiple-value-bind`); вложенная тень — другое связывание; quoted/quasiquoted — данные,
-  не переименовываются. Плюс `documentHighlight`, `workspace/symbol`,
-  `documentSymbol` (def-виды + `deftest` со строковым именем).
-- **Семантические токены** (`semanticTokens/full`): легенда
-  function/macro/variable/parameter/keyword/string/number/comment/operator; голова формы,
-  параметры `defun`/`lambda`, переменные `let`/`loop`; функции в позиции значения — по
-  вызовам/индексу/таблице stdlib; комментарии отдельным списком; многострочные литералы по
-  строкам; скобки — `operator` + модификатор `depth0..depth7` (rainbow).
-- **Удобства**: `signatureHelp`, `inlayHint`, `selectionRange`, `callHierarchy`
-  (prepare/incoming/outgoing), code actions (дописать `)`), document links
-  (`load`, `import-from`), foldingRange, formatting (Lisp-отступы: тело defun/let/if/… =
-  col+2, аргументы после головы headCol+len+1; многострочные строки и пустые строки не
-  трогаются), автодополнение с hover-документацией.
-- **Таблица stdlib**: `tools/gen_lsp_symbols.py` → `src/lsp/stdlib_symbols.inc` (имя, вид,
-  сигнатура, параметры, docstring, required/optional/rest); работает без исходников stdlib,
-  CI сверяет `--check`.
-- **UTF-16**: входящие позиции переводятся в байты, исходящие диапазоны — в UTF-16 code
-  units, поэтому кириллица не сдвигает позиции.
-- **Ограничения**: индекс — снимок initialize + watched files; unbound-проверки нет.
-- Регрессионный тест — `tests/lsp_test.sh` (JSON-RPC-драйвер over stdio, **112 проверок**,
-  зелёный под ASan и wine; на Windows `file:///C:/dir` → `C:/dir`, stdout в бинарном режиме).
-- Пакетный режим того же движка — `tools/qlsp-check.py`: диагностика читателя
-  (незакрытые/лишние скобки) плюс структурный план `defun`-дерева (`--symbols`).
-  Для C++ навигация идёт через `clangd` по `build/compile_commands.json`, который генерирует
-  CMake (`-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`).
-- Расширения: `editors/vscode/` (TextMate-грамматика, language-configuration, радужные
-  скобки, `npm install && npm run package` → `.vsix`) и `editors/nvim/qualisp.lua`.
+| Модуль | Роль |
+|---|---|
+| `expr.zig` | знаковое дерево NS-выражений, канонизация, инварианты |
+| `bdd.zig` | ROBDD, порядок переменных по первому появлению |
+| `coverage.zig` | проверки покрытия: `I ∧ ¬covered` UNSAT, `I ∧ Gi ∧ Gj` UNSAT, `I ∧ Gi` SAT |
+| `form.zig` | разбор формы `ns-if` |
+| `router.zig` | атомы `[B,K]` → знаки → band → ветвь → группы строк; проверка overlap/uncovered на месте |
+| `compaction.zig` | counting sort, `gatherRows`/`scatterRows` для всех 4 dtype |
+| `plan.zig` | runtime-план |
+
+Дискретное условие — NS-функция: непрерывная level-функция, знак которой равен истинности; `>`/`<`/`and`/`or` не перегружаются. `ns-grt`/`ns-geq` — `a-b`, `ns-lss`/`ns-leq` — `b-a`, `ns-and`/`ns-or` — левая свёртка бинарной R-функции, `ns-not` — `-p`, `ns-eq`/`ns-neq` — сахар полосы. n-арная формула `Σaᵢ − √(Σaᵢ²)` знаково неверна при n ≥ 3.
+
+Два спуска: знаковый (для роутера и проверки покрытия, без `sqrt`/делений) и числовой (только если значение используется как данные). Диспетчеризация никогда не берёт знак float-значения R-комбинации. `band[i] = ∃j |atom_j[i]| < ε`; `|combined|` не вычисляется. Guards разворачиваются в булевы формулы над K атомами; непокрытие, пересечение и пустая ветка — ошибки компиляции (`NsIfUncovered`, `NsIfOverlap`, `NsIfEmptyBranch`).
+
+Forward: atoms → band → branch → counting sort → gather/вызов подграфа/scatter → tape (`branch[]`, `order[]`, counts/offsets, `band[]`, atoms). Стоимость O(B·K) на роутер плюс сумма строк исполненных ветвей; ветки без строк не исполняются. Backward идёт только по исполненным веткам; в `defgraph` маршруты пересчитываются из сохранённых атомов и `eps`, активации ветки пересчитываются на её строках. Градиента по решению роутера нет.
+
+Мост `neuro`: `(term 'ТЕРМ '(vars))` и `term->code` собирают тензорный код из символьного терма; проверка отделена от генерации (`term-problem` возвращает первое сообщение, не бросая).
+
+## 19.11 Инструменты трассировки
+
+Профайлер — инструмент, не фича языка: форм `profile-start`/`profile-stop` нет; включение только `qualisp --trace out.json script.qlsp`. Пишется Chrome Trace JSON: события `B`/`E`, микросекунды, `pid=1,tid=1`; трасса пишется и при ошибке (`defer` в `main`); каждый хук вне трассировки — одна проверка `active`. Инструментированы только невидимые из AST точки: границы вызовов функций, вызов HLO-графа, фаза `ns-if`. Компиляция JIT-страницы входит в inclusive-время первого вызова.
+
+`tools/qprof` — агрегатор: `qprof <trace.json> [--top N]`, таблица `name / calls / total_us / self_us / self%`. Без аргументов — `usage: qprof <trace.json> [--top N]` (exit 2).
+
+```text
+$ qprof /tmp/fib.json
+trace: /tmp/fib.json (16722 events)
+name                          calls       total_us        self_us   self%
+FIB                            8361       255806.0        21248.0  100.0%
+
+total self time: 21248.0 us
+```
 
 ## 19.12 Сборка и инструменты
 
 ```bash
-# Native Linux (LLVM не нужен)
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
-
-# Кросс-компиляция qvalent/qualisp-lsp под Windows из Linux
-# (для qualisp корректный путь — нативная MSYS2-сборка)
-cmake -B build-windows \
-  -DCMAKE_TOOLCHAIN_FILE=cmake/x86_64-w64-mingw32.cmake \
-  -DCMAKE_BUILD_TYPE=Release
+zig build          # сборка в zig-out/bin/qualisp
+zig build test     # 834 теста
+zig build run      # запуск
+zig fmt src        # форматирование
+bash bench/run.sh  # замеры (эталон — Rust -O3)
+gh workflow run CI # ручной CI: Linux и Windows
 ```
 
-Продукты сборки (из `CMakeLists.txt`):
+`build.zig` импортирует `build.zig.zon` для `manifest.version`; для Windows выставляет `exe.stack_size = 256 * 1024 * 1024`. `zig build test`: **834 теста** на Linux и 834 на Windows (3 POSIX-FFI теста пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы). Регистрация — `src/tests.zig`, 24 файла `_test.zig`; крупнейшие: `jit_test` (170), `checker_test` (88), `session_test` (82), `ns_test` (66), `ns_expr_test` (58), `ns_lang_test` (44), `lexer_test` (43), `printer_test` (36). Системы сюит `deftest`/`run-tests` в реализации нет — тесты плоские.
 
-- `qualisp` — REPL/интерпретатор + встроенный JIT (OpenBLAS, OpenMP; LLVM не нужен).
-- `qualisp-lsp` — LSP-сервер (только `src/lsp/server.cpp`).
-- `qvalent` — пакетный менеджер (только `src/qvalent/main.cpp`).
-- `qualisp-prof` — профилировщик (Rust, CMake `-DQUALISP_PROF=ON`, по умолчанию OFF).
-- `qualisp-dbg` — отладчик (Rust, CMake `-DQUALISP_DBG=ON`, по умолчанию OFF).
+Релизные артефакты: `qualisp-0.19.15-linux-x86_64`, `qualisp-0.19.15-windows-x86_64.exe`, `qprof-0.19.15-linux-x86_64`, `qprof-0.19.15-windows-x86_64.exe/.pdb`, `SHA256SUMS.txt`; `--version` печатает `qualisp 0.19.15`.
 
-Без cargo сборка и CI остаются зелёными: инструменты разработчика — опциональные цели.
-AOT-компилятора нет: всё нативное собирается на лету из S-выражений.
+Платформы: Linux x86-64 — основная; Windows x86-64 (`gnu`/`msvc`) — с SysV-ABI для JIT-кода; отличаются только W^X (`VirtualAlloc`/`VirtualProtect`), файловые хэндлы-токены поверх `std.Io.File` и резерв стека в PE. FFI: POSIX — `dlopen`/`dlsym`, Windows — `LoadLibraryA`/`GetProcAddress` и Win64-трамплин (регистры по позиции аргумента, 32 байта shadow space, стек для позиций ≥ 4).
 
-Модули stdlib вшиваются в бинарник на этапе сборки (`cmake/stdlib_embed.cmake`, через
-`cmake/gen_stdlib_header.cmake` — без `xxd` для переносимости на MSYS2/MinGW) — поэтому
-дистрибутив Qualisp — один файл ~2 МБ.
+Замеры ReleaseFast: fib 42 мс, matmul 16 мс, reduce 6 мс, ns-if graph 58 мс (эталон — Rust `-O3`). Относительные изменения по этапам оптимизации: fib(30) −11 %, loop-id −9 %, взаимная рекурсия с разными кадрами −8 %.
 
-Гейты: `tools/asan_gate.sh`, `tools/poison_gate.sh`, `tools/async_gate.sh`,
-`tools/eager_loop_gate.sh`, `tools/prof_live_gate.sh`, `tools/dbg_gate.sh`.
-
-### Windows-сборка
-
-Windows-сборка портируема (mingw-портируемость: коллизии enum, guard BLAS-линковки, native
-DOT) — CI зелёный на Linux и Windows.
-
-Корректные пути для Windows-бинарника:
-
-1. **CI** (`.github/workflows/build.yml`, job `windows`): MSYS2 MinGW64 + OpenBLAS нативно под
-   Win64 ABI. Артефакты CI публикуются как релизные бинарники.
-2. **MSYS2 локально**: установить `mingw-w64-x86_64-gcc`/`mingw-w64-x86_64-openblas`, затем
-   `cmake -G "MinGW Makefiles" -S . -B build && cmake --build build -j`.
-3. **Кросс-компиляция `qualisp-lsp`/`qvalent` из Linux** через toolchain-файл (см. выше).
+QSRD — бинарный формат с magic `"QSRD"`, u16 major/minor, таблицей секций с crc32 и секциями `meta`, `symbols`, `forms`, `data`, `model`; `save-weights`/`load-weights` работают с секцией `model`. Читатель `tools/qsrd` на Rust: `inspect`, `verify`, `cat`, `params`, `symbols`, `extract`; есть конформанс-корпус.
 
 ## 19.13 Ключевые константы
 
 | Параметр | Значение |
 |---|---|
-| Блок scratch-Scope | 16 МБ (`DEFAULT_BLOCK_SIZE`) |
-| ConsCellPool | предвыделенный, блоки по 1M ячеек фиксированного размера; `acquire`/`free` — O(1) |
-| Guard глубины | 10 000 eval-кадров; ловимая ошибка + `(EVAL-MAX-DEPTH n)`; RAII-декремент, eval жив после catch |
-| Кольцо DEBUG-TRACE | 4096 записей; категории `scope`/`clone`/`expand`/`macro`; выключено по умолчанию |
-| rc-контракт | `refs_` живёт только в stable-ячейке (birth-единица при создании; маркер мёртвой ячейки — `refs_ == 0`; `nil` бессмертен); `QUALISP_RC_POISON=1` — яд против use-after-release |
-| LSan-гейт | ASan c `detect_leaks=1` + `ulimit -s unlimited`, рецепт `tools/asan_gate.sh`; гейт собирает **все** падения за прогон и падает в конце, а не на первом файле |
-| Диагностика памяти | `QUALISP_MEM_ROOTS=1` — обход живых корней и кольцо rc-событий; `POOL-DUP` — детектор двойного освобождения; `tools/poison_gate.sh` — crash-aware гейт яда (exit-код + маркер успеха + тексты нарушений) |
-| Владение | scope-дерево (откат = одна запись), скретч = стек (смерть только откатом), RC — только в stable (каскад worklist); правило корня: stable не держит скретч; конвенция передачи (birth-единица, `kHandedBit`); данные тензоров — без RC: один владелец, точный размер, `TensorBufferPool` |
-| TensorBufferPool | exact-size, кэш по (shape, dtype); буфер уходит системе, если пул превышает лимит (1 GiB) |
-| Страницы JIT | реестр с претензиями (claims), ключованными эпохой рождения страницы; смерть последней обёртки освобождает страницу; `jit-pages` в `(mem-report)` |
-| Асинхронный слой | пул воркеров, по умолчанию один воркер; `QUALISP_THREADS=N` поднимает до N+1 потоков (с потоком программы) — при 3+ воркерах риск гонки, см. гл. 15.12 |
-| SIMD (AVX2/FMA) | 8×f32 = 256 бит |
-| SIMD (NEON) | 4×f32 = 128 бит |
-| Кэш HLO | in-process fingerprint (версия эмиттера + shape-ключ + dtype) |
-| Порог JIT | `k_hot_calls = 64` вызовов до компиляции страницы; heal — те же 64 |
-| Листья FUSION | `k_max_operands = 5`; одновременно живых ymm — не более 8 |
-| Модули stdlib вшито | 16 (collections core string ml dl ns io regex audio datetime pkg errors visual tablet async argparser) |
-| `dl` | слои-как-данные; `linear`/`net-forward`/`train-step`/`train-epochs`, `attention`, `emb-lookup`, чекпоинт Adam, клип |
-| Таблица символов LSP | `src/lsp/stdlib_symbols.inc`, генерируется `tools/gen_lsp_symbols.py` |
-| Стенсилы JIT и HLO | AVX2 x86-64, SysV и Win64 |
-| GCC/Clang (минимум) | GCC 13+ / Clang 16+ (C++20); LLVM не нужен |
-| qvalent локальный каталог | `./qualisp-packages/<name>/` |
-| qvalent кэш | `$HOME/.cache/qualisp/<deployer>/<repo>/` |
-| QSRD v2 magic | `"QSRD"` (u16 ver) |
-| Tail-call | self-хвост пере-биндит кадр; гейт по живым tape-узлам; `let`/`let*` разворачиваются до 8 уровней |
-| Контракт CI | `run-tests` считает падения в `*test-failed*` (упавший assert проваливает тест); процесс возвращает 1 при любом упавшем сюите; сводка печатает счётчики |
-| Тесты | **193** `.qlsp`-сюиты в `tests/` (плюс фазовые в `test/` и C-тесты embedding), зелёный (Release, Linux); ASan-гейт с `detect_leaks=1` по всему корпусу; poison-гейт `QUALISP_RC_POISON=1` по всему корпусу |
+| Арена кадров вызова | `1024 * 1024` слотов (~24 МБ адресного пространства); LIFO, исчерпание — типизированная ошибка |
+| Резерв машинного стека | 256 МБ (`raiseStackLimit`, `stack_size` в PE) |
+| Воркеры компиляции графа | `min(cpu_count, 8)` |
+| AVX2 | 8×f32 / 4×f64 |
+| Reductions | 8 независимых f64-полос, фиксированный порядок сведения |
+| Source map | ~24 байта на форму, `MapEntry{start,end,span}` |
+| DType | `f16`, `f32`, `f64`, `u8` |
+| Модули stdlib | 11 (`probe.qlsp` — только в test-сборках) |
+| Тесты | 834 (`src/tests.zig`, 24 файла `_test.zig`) |
+| QSRD | magic `"QSRD"`, u16 major/minor, crc32 на секцию |
 
 ## 19.14 Известные ограничения
 
-- **GPU-бэкенда нет.** Устройство одно — CPU. `Device` остаётся абстрактным интерфейсом
-  (alloc/free, пул, `launch_*`), чтобы бэкенд можно было добавить позже, но в дереве нет
-  ни CUDA-, ни ROCm-кода. `launch_*` покрывают float и half (F16); double/int — через
-  `get_float`/`set_float`.
-- **HLO:**
-  - f16 идёт в интерпретаторный фоллбэк (в стенсиле — только F32/I32);
-  - часть буферов узлов при ROUTE освобождается небезопасно: тела ветвей читают значения
-    главного графа «ambient», без ребра от ROUTE. Направление — собственное пространство
-    буферов у ветвей, то есть переработка исполнителя, а не точечная правка;
-  - `ROUTE`, `COMPOSITE`, `EXP/DIV/SUM/MAX` и смешанные broadcast/reduce-маски идут
-    интерпретаторным фоллбэком;
-  - `GRAPH->PROGRAM` с claims (ROUTE) отказывает.
-- **Диспетчеризация ROUTE стенсилами** не поддерживается: ROUTE исполняется fallback-программой.
-- **`let` под биндингом с 1- или 2-байтным dtype теряет свои биндинги** (F16, U8; на F32 не
-  воспроизводится). Практический обход: такие тензоры связывать через `defvar`, вложенный
-  `let` под ними не ставить.
-- **Смерть scratch-ячеек — только откатом scope'а**: пер-ячеечного free в скретче нет — это
-  модель, а не упущение (§5.5.2). Лента autograd и бектрейс живут по своим каналам (сырые
-  `Tensor*`, копии форм) и правилом корня не покрываются автоматически (§5.5.10).
-- **Хвостовой перебиндинг TCO делит под RC только уже стабильные параметры**; scratch-параметры
-  и горячий ML-путь копируются. Нужна смена конвенции возврата — это изменение всей цепочки
-  eval, поэтому вопрос остаётся открытым.
-- **Сравнение плавающих в release ненадёжно** (`-ffast-math`): конечность — через
-  `(FINITE? t)`, числовые пороги в тестах — выше baseline вырожденного решения.
-- **Глубокая не-хвостовая рекурсия переполняет стек**; TCO снимает этот предел для
-  self-хвостов.
-- **Острова циклов через `set_cdr` не собираются** — GC нет, циклы по определению не
-  разбираются.
-- **`run-tests` освобождает реестр в конце**: повторный вызов в том же скрипте даёт `0/0
-  passed`.
-- **JIT-стенсилы** — AVX2 x86-64 под SysV и Win64; покрытое подмножество форм невелико;
-  `MACROLET`-тела не компилируются; bail = повтор тела интерпретатором (transaction-retry,
-  гл. 20.7).
-- **У JIT-страниц и HLO-ядер нет `.pdata`**: исключение не должно пересекать нативный кадр —
-  фасады `call_value`/`rest_list` ловят его и возвращают bail-токен.
-- **FFI-трамплин Windows — SysV-only**: `FFI-LOAD` работает, `FFI-DEFUN`/вызов падает.
-- **Асинхронный слой**: при ≥ 3 воркерах задача с циклом по `let`-переменной может вернуть
-  испорченное значение; пул по умолчанию последовательный.
-- **`DISCARD-JIT` из jitted-кода снимает страницу под собой** — известная шероховатость
-  (гл. 20).
-- **Колбэков C→Lisp во FFI нет**: FFI односторонний — Lisp вызывает C, обратного трамплина не
-  существует; в Embedding C API есть `qualisp_register_prim` — C-функция регистрируется как
-  примитив Lisp (гл. 16).
-- **Trait-объекты отложены**: трейт — контракт (набор методов с именами и арностями),
-  динамического dispatch по vtable-trait нет; диспетч метода идёт по первому аргументу.
-- **Бектрейс из JIT-кода несёт мастер-форму вызываемого**, а не исходную форму вызова:
-  нативный код не имеет unwind-таблиц (§19.5).
-- **TCO схлопывает кадры бектрейса**: один кадр на хвостовой цикл (контракт, как в
-  Scheme) — промежуточные вызовы хвостовой рекурсии в бектрейсе не видны.
-- **Асинхронный слой: при трёх и более воркерах возможна порча значения** в задачах с циклом
-  по переменной `let` — кросс-поточная гонка в общем состоянии интерпретатора не локализована.
-  Пул по умолчанию последовательный; `QUALISP_THREADS` — на риск оператора (гл. 15.12).
-- **EnvFrame** — SExpr-alist; переработка окружения (self-hosting) — направление развития.
-- **Произвольное переписывание графа** (`graph-node`/`graph-rewrite`) не поддерживается; база
-  есть: `GRAPH-DATA`/`GRAPH-FROM-DATA`/`GRAPH-RUN-PASSES`.
-- **Семантические диагностики LSP** (unbound vars, арность), semantic tokens, signatureHelp —
-  roadmap.
-- **CI** — GitHub Actions (`build.yml`) на Linux и Windows; тесты — `.qlsp`-скрипты в `test/`
-  (standalone) и `tests/` (`deftest`/`run-tests`); артефакты CI публикуются как релизные
-  бинарники.
+- **GPU/Device нет.** Вычисления идут на CPU x86-64 через JIT и AVX2-ядра; других архитектур и бэкендов нет.
+- Deopt не реализован: страницы не специализированы, helper-путь и есть generic-путь; guard'ы ставят `RuntimeError`, а не перекомпилируют страницу.
+- `:any` запрещён; HM-вывод между функциями не делается; пользовательских перегрузок нет.
+- Writable views и `t-slice` отсутствуют; `reshape`/`transpose`/`t-rows`/`t-select-rows` копируют.
+- Autograd: `grad!` привязан к последнему запуску графа в форме; в графе нет `tref`/`tset!`, `pow`/`sqrt`/`sin`/`cos`/`atan`/`argmax`; reductions — только float; нет вложенных графов, рекурсии и data-dependent control flow; нет автоматических CSE/DCE/FUSION.
+- Параметры, не участвовавшие в запуске, сохраняют старый градиент; `clear` не освобождает граф и JIT-страницу до teardown.
+- Struct-инстансы и `Result` живут до `Runtime.deinit`; ошибки не разматываются через нативный C-стек.
+- `eval` возвращает `:syntax`/`:atom` консервативно; конкретика через `the`.
+- В релизе только `qualisp` и `qprof`: других инструментов в поставке нет. Отдельного модуля `async` нет — только примитивы `future`/`await` и тип `(:future T)`; `FFI` и `NS` — не импортируемые модули.
+- Обновление `defvar`/`setq` глобала внутри `future` — runtime-ошибка; возвращать future из future нельзя.
 
 ## 19.15 Модель памяти (кратко)
 
-Полное описание — гл. 5.5; здесь — сводка механики, на которой держится рантайм.
+Полное описание — гл. 5; здесь — сводка механики, на которой держится рантайм.
 
-- **Три правила модели.** Дерево scope'ов = дерево вычислений: каждый вызов функции (и
-  loop-точки `while`/TCO) получает дочерний scope своего вызывающего, откат scope'а — одна
-  запись; scope — стековый RAII-объект, throw из глубины вызовов откатывает сам. Значение
-  живёт в scope'е своего хранилища: промежуточные данные умирают на конце своего scope'а,
-  результат и записываемое значение переезжают в scope хранилища (мосты: авто-клон
-  результата, promote при записи, промоут пары при захвате), def-формы пишут в stable всегда.
-  Побег региона — явное событие: регион переходит родителю (не откатывается), если результат
-  указывает в него ИЛИ в нём есть клетка с чужим владельцем; гистерезис — списко-образующая
-  рекурсия не откатывает регион (O(аллокаций), копий нет), мусорная — O(глубина).
-- **Скретч = стек.** Скретч-ячейки не несут счётчика, смерть — только откатом
-  (`scratch_death`); RC живёт только в stable (не-LIFO сроки: `defvar`/`defun`, веса,
-  программы, реестры). Живая unmanaged-ячейка несёт birth-единицу; маркер мёртвой ячейки —
-  `refs_ == 0`.
-- **Правило корня.** Stable-хранилище не держит скретч-ячейку — «ссылка не переживает свой
-  root» выполняется по построению. Захват замыканием = явный промоут пары биндинга в stable:
-  та же ячейка, ноль копий, значение общее (EQ-тождество). Правило записи: мир держателя
-  решает — запись в захваченный биндинг идёт в stable.
-- **Конвенция передачи владения.** Birth-единица ячейки передаётся первому держателю (метка
-  `kHandedBit`), перезапись поля освобождает старое значение, «разделение» — явный `hold` в
-  точке деления.
-- **Payload независим от ячеек.** Тензор — одно выделение [заголовок | данные] с единственным
-  разрушителем; struct-слоты и байты строк — всегда `malloc`.
-- **Окна.** Read-only окна (`T-ROWS`/`T-SLICE`, строковые `STRING-VIEW`/`STRING-REF`) — явный
-  алиас только для чтения: владелец держится счётчиком, скретч-владелец повышается, escape в
-  stable материализует копию. Writable views по-прежнему нет, и это не исключение из трёх
-  правил.
-- **Наблюдаемость.** `(mem-report)` несёт 28 ключей: `vm-alloc-bytes`/`vm-free-bytes`/`vm-live-bytes`,
-  `scopes-born`/`scopes-died`, `scratch-cells`/`scratch-cells-released`/`scratch-cells-live`,
-  `graph-buffer`/`graph-bytes` и прежние реестры и счётчики (полный список — §5.5.9).
-  Диагностика: `QUALISP_MEM_ROOTS=1` — обход живых корней и кольцо rc-событий для охоты за
-  утечками; `POOL-DUP` — детектор двойного освобождения; `QUALISP_RC_POISON=1` и crash-aware
-  `tools/poison_gate.sh` — гейт яда.
+**Модель (SPEC/AGENTS):** три пула HibLin — `ConsCellPool` (стек скоупа: cons, rope-узлы, замыкания, структуры), `StableMemory` (`defvar`, веса, глобалы, JIT-страницы; освобождение — `clear`/teardown), `TensorBufferPool` (только HLO, exact-size free lists). GC, RC и аренщика общего назначения нет.
+
+**Реализация в Zig:** `Store` — bump-регион фиксированных cons-ячеек и байтов с `mark()/restore()`; `Runtime` держит `world`/`scratch` и плотный массив глобалов; `cloneToWorld` — глубокая копия; кадры вызовов — отдельная bump-арена (§19.5). Исключения модели: бессмертные `nil`/`t`/символы; stable живёт до `clear`/teardown; циклы в мутабельных stable-структурах не собираются; JIT-страницы — выбрасываемый кэш; `eval` — единственная граница статики.
+
+Stable никогда не ссылается на scratch: запись scratch-значения в stable — глубокая копия. Замыкание захватывает локальные биндинги копией, глобалы — live. `setq` перемещает значение в биндинг; `defvar` копирует. Возврат из скоупа — откат указателя `Store` и копия значения в родительский скоуп.
 
 ---
 
-Подробности по подсистемам: гл. 10 (HLO-стенсилы), гл. 20 (JIT copy-and-patch), гл. 21
-(образы), гл. 22 (Tablet). Тесты — **193** `.qlsp`-сюиты в `tests/` (плюс фазовые в `test/`):
-`jit.qlsp`, `jit_page_lifetime.qlsp`, `func_atom.qlsp`, `tape_fn.qlsp`, `tape_form.qlsp`,
-`tape_grad_accum.qlsp`, `tape_gather.qlsp`, `tape_slice.qlsp`, `tensor_gather.qlsp`,
-`slice_lifetime.qlsp`, `string_ref.qlsp`, `operator_overload.qlsp`, `activation_grad.qlsp`,
-`grad_clip.qlsp`, `adam_checkpoint.qlsp`, `inference.qlsp`, `dl_features.qlsp`,
-`attention.qlsp`, `async.qlsp`, `image.qlsp`, `hlo_stencils.qlsp`, `hlo_stencil_ops.qlsp`,
-`hlo_start.qlsp`, `hlo_form_master.qlsp`, `hlo_program_form.qlsp`, `hlo_attention.qlsp`,
-`hlo_graph_data.qlsp`, `f16_dtype.qlsp`, `stdlib_losses.qlsp`, `tablet.qlsp`, `dl.qlsp`,
-`memory_setq.qlsp`, `loop_lifetime.qlsp`, `memory_pools.qlsp`, `production_mem.qlsp`,
-`expansion_cache.qlsp`, `debug_trace.qlsp`, `tail_call.qlsp`, `stack_guard.qlsp`,
-`rc_contract.qlsp`, `rc_escape.qlsp`, `scope_tree.qlsp`, `b2_counters.qlsp`,
-`b3_regions.qlsp`, `adam_state.qlsp`, `arena_stress.qlsp`, `live_globals.qlsp`, `equal.qlsp`,
-`tref.qlsp`, `print_arity.qlsp`, `math_ops.qlsp`, `tensor_print.qlsp`, `grad_lifetime.qlsp`,
-`ns_router_hlo.qlsp`, `homoiconic.qlsp`, `io.qlsp`, а также продакшен-сюит
-`production_training.qlsp` (CSV-датасеты из `tests/data/`: классификация и регрессия,
-HLO-депл с проверкой против интерпретатора, плоская память по эпохам, round-trip образа и
-весов). Проверочный контур памяти — гл. 5.5: poison-гейт (`tools/poison_gate.sh`),
-ASan-гейт, `POOL-DUP`, `QUALISP_MEM_ROOTS` и `(mem-report)`; гейт асинхронного слоя и
-занятости ядер — `tools/async_gate.sh`; гейты профилировщика и отладчика —
-`tools/prof_live_gate.sh` и `tools/dbg_gate.sh`.
+Подробности по подсистемам: гл. 6 (тензоры), гл. 7 (autograd), гл. 10 (HLO), гл. 20 (JIT copy-and-patch), гл. 21 (образы QSRD). Тесты — 834 плоских теста в 24 файлах `_test.zig`, зелёные по `zig build test` на Linux и Windows.

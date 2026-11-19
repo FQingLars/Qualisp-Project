@@ -1,361 +1,249 @@
 # Глава 16. Пакеты и FFI
 
-## 16.1 Два способа ставить пакеты
+В 0.19.15 «пакетная экосистема» в привычном смысле отсутствует. Внешний код попадает в программу тремя способами: быть частью встроенной stdlib (`import`), быть отдельным `.qlsp`-файлом, запущенным раннером, или быть разделяемой C-библиотекой через FFI. Ни `qvalent`, ни `pkg-install`, ни `http-get`, ни LSP в релизе нет. Зато есть собственный бинарный формат QSRD, инструменты `tools/qsrd` и `tools/qprof` и кросс-платформенный FFI-трамплин.
+
+## 16.1 Способы подключить код
 
 | Способ | Что это | Python-аналог |
 |---|---|---|
-| `qvalent` (CLI) | Полноценный пакетный менеджер с манифестом `qvalent.toml` | `pip` + `pyproject.toml` |
-| `(pkg-install "user/repo")` | Лёгкая установка из stdlib (через `http-get` примитив) | `curl install.sh` |
+| `(import модуль)` | один из 11 встроенных модулей, вшитых в бинарник | `import` из стандартной библиотеки |
+| отдельный `script.qlsp` | файл, переданный раннеру `qualisp script.qlsp [args…]` | `python script.py` |
+| `(ffi-load path)` + `(ffi-defun …)` | разделяемая C-библиотека с объявленными сигнатурами | `ctypes.CDLL` + `argtypes`/`restype` |
+| `(save-image …)` / `(load-image …)` | снимок пользовательского мира в QSRD | `pickle` + восстановление сессии |
 
-## 16.2 qvalent: pip для Qualisp
+Пакетного менеджера `qvalent` **в релизе нет** — нет ни CLI, ни манифеста `qvalent.toml`, ни команды `qvalent get user/repo`. Нет и модуля `pkg` с `(pkg-install …)`: сетевых примитивов `http-get` в рантайме нет. Это не «урезанный» менеджер, а осознанный non-goal: среда целиком лежит в бинарнике, а расширение — либо FFI, либо свои файлы.
 
-CLI `qvalent` (`src/qvalent/main.cpp`) — отдельная цель CMake. Команды (из `print_usage()`):
+> 🐍 Вместо `pip install` + `pyproject.toml` — `import` из stdlib и `ctypes` для внешнего кода. Всё остальное — вне среза релиза.
 
-```bash
-qvalent init                                 # создать qvalent.toml в текущей директории
-qvalent get user/repo[@version]              # установить (версия опциональна)
-qvalent list                                 # установленные пакеты
-qvalent info <name>                          # детали пакета
-qvalent update <name>                        # обновить
-qvalent remove <name>                        # удалить
-qvalent search <query>                       # поиск по GitHub (topic:qualisp)
-qvalent help                                 # эта справка
-```
+## 16.2 Встроенные модули вместо пакетов
 
-Пакет — репозиторий GitHub с манифестом `qvalent.toml`:
-
-```toml
-[package]
-name = "my-package"
-version = "0.1.0"
-description = "A Qualisp package"
-deployer = "your-github-username"
-repo = "repo-name"
-
-[dependencies]
-```
-
-Реализация: парсер TOML — крошечный встроенный (`parse_qvalent_toml` в `main.cpp`). Скачивание — через `curl -L` tarball/zip с GitHub API → кэш `$HOME/.cache/qualisp/<deployer>/<repo>/` → распаковка в локальный каталог `qualisp-packages/<name>/`. Поиск (`qvalent search`) ходит в GitHub по метке `topic:qualisp`.
-
-> 🐍 `qvalent get user/repo` ≈ `pip install git+https://github.com/user/repo`; `qvalent search` ≈ `pip search` (который в pip давно отключили).
-
-## 16.3 pkg-install: минимум
-
-Модуль `PKG` (`stdlib/pkg.qlsp`) — качает `pkg.qlsp` из ветки `main` репозитория и перечисленные в нём файлы:
+Раздел сохраняет номер прежнего описания `qvalent`, но описывает реальное состояние: «менеджером» служит загрузчик встроенных модулей.
 
 ```lisp
-(import PKG)
-(pkg-install "user/repo")                 ;; → /tmp/qualisp-pkg-<repo>/
-(pkg-install-branch "user/repo" "dev")    ;; другая ветка
+(import ml)                       ; → ML — загрузить и открыть экспорты
+(import-from collections (sum find unique))  ; → nil — только три имени
 ```
 
-Внутри (`pkg-install-branch`):
-1. `http-get` на `https://raw.githubusercontent.com/<repo>/<branch>/pkg.qlsp`.
-2. Парсинг манифеста (список файлов).
-3. `mkdir -p /tmp/qualisp-pkg-<repo>` + `spit` манифеста.
-4. Для каждого файла в манифесте: `http-get` + `spit`.
+Правила загрузки (подробнее — гл. 15.11–15.14):
 
-Годится для простых библиотек-однофайловок; для всего остального — `qvalent`.
+- модули — Qualisp-код, вшитый через `@embedFile`; `core` — prelude, остальные ленивые;
+- импорт идемпотентен, приватные имена недостижимы, экспорты — алиасы;
+- конфликт публичных имён — `ImportConflict`;
+- неизвестный модуль — `UnknownModule`, неизвестный экспорт — `UnknownExport`;
+- `FFI` и `NS` не модули: `(import FFI)` даёт `error: UnknownModule`.
+
+Для собственного кода нет реестра и установщика: положите файл рядом и запустите `qualisp mylib.qlsp` либо загрузите его как скрипт. Как «пакет» можно сохранить снимок мира через `save-image` и загрузить его позже — но это персистенция, а не менеджер зависимостей.
+
+> 🐍 `import ml` ≈ `import sklearn.metrics` из уже установленного окружения; собственного `pip` нет, а `sys.path` заменяет явный путь к файлу в CLI.
+
+## 16.3 Собственные файлы и образы
+
+Как выглядит рабочий цикл без пакетного менеджера:
+
+```bash
+$ qualisp script.qlsp --verbose --name lena input.txt
+```
+
+Всё после имени скрипта — program args; `(command-line-args)` вернёт их список с argv[0] во главе (гл. 15.17). Флаги самого интерпретатора (`--trace`) разбираются **только до** имени скрипта.
+
+Для сохранения состояния есть образы QSRD:
+
+```lisp
+(defvar base :fixnum 10)
+(save-image "/tmp/world.qimg")     ; → nil
+
+;; в другой сессии
+(load-image "/tmp/world.qimg")     ; → nil
+base                              ; → 10
+```
+
+`save-image` пишет только пользовательские формы/данные; stdlib не входит. `load-image` чистит пользовательский мир, исполняет формы (пересобирая JIT/HLO/defuse/макросы), затем накладывает снимок `defvar`; загрузка **не атомарна**. Не сериализуются `future`, `:ptr`, JIT-страницы, HLO/defuse-кернелы, FFI-указатели, stdin/fd. `ffi-load`/`ffi-defun` при загрузке образа переигрываются — библиотеки должны быть доступны.
+
+> 🐍 Примерный аналог — `pickle.dump(session.__dict__)` и `pickle.load` в начале нового процесса; только это не объект Python, а снимок пользовательского мира языка.
 
 ## 16.4 FFI: вызов C-библиотек
 
-Qualisp умеет загружать разделяемые библиотеки и вызывать C-функции напрямую. Реализация — `src/ffi/ffi.cpp`, примитивы регистрируются через `register_ffi_primitives`. Рабочий путь один — **объявленные сигнатуры**: `FFI-LOAD`, `FFI-DEFUN` (сигнатуры пишутся явно, типы проверяются строго, вызов идёт через трамплин ABI), `FFI-DEFSTRUCT` (раскладка C-структур), `FFI-ADDR`/`FFI-OFFSET`/`FFI-SIZE`, плюс low-level `FFI-IMPORT`. Обратная сторона той же границы значений — embedding C API, где C зовёт Lisp (16.6).
+FFI — примитивы рантайма, а не модуль. Реализация — `src/ffi/ffi.zig`: C-типы, `Signature`, `FfiArgs`, `FfiFunction` и генератор trampoline. Собственный x86-64-трамплин вызывается по SysV (как весь JIT), но целевая C-функция получает **нативный ABI ОС**: SysV на Linux, Win64 на Windows. libffi не используется — внешних зависимостей нет.
 
-### FFI-LOAD / FFI-IMPORT: загрузка библиотек
+### 16.4.1 ffi-load: загрузка библиотеки
 
 | Примитив | Что делает |
 |---|---|
-| `(FFI-LOAD "libm.so.6")` | `dlopen`, возвращает индекс загруженной библиотеки |
-| `(FFI-IMPORT "libfoo.so" "fn-name")` | загрузить и сделать символ видимым (low-level) |
+| `(ffi-load path)` | загрузить библиотеку, вернуть `:fixnum`-индекс |
 
 ```lisp
-(ffi-load "libm.so.6")              ;; → индекс загруженной библиотеки
+(ffi-load "libm.so.6")    ; → 0 — индекс загруженной библиотеки
 ```
 
-> 🐍 **Python-аналогия.** `ctypes.CDLL("libm.so.6")` — только функции объявляются явно (`FFI-DEFUN`), а не вызываются по угаданным сигнатурам.
+На POSIX это `dlopen`/`dlsym` через `std.DynLib`. На Windows — `LoadLibraryA`/`GetProcAddress`/`FreeLibrary` напрямую: у `std.DynLib` в используемой версии Zig нет Windows-бэкенда. Хранилище — `Runtime.FfiLib`.
 
-### Кросс-платформенность
+> 🐍 `(ffi-load "libm.so.6")` ≈ `ctypes.CDLL("libm.so.6")`; только символы не «угадываются» при вызове, а объявляются явно.
 
-На Linux/macOS — `dlopen`/`dlsym`/`dlclose` (`src/core/platform.hpp`). На Windows — `LoadLibraryA`/`GetProcAddress`/`FreeLibrary`. На macOS библиотеки имеют расширение `.dylib` (`SHARED_LIB_EXT`), на Windows — `.dll`.
-
-### FFI-DEFUN: объявленные сигнатуры
+### 16.4.2 ffi-defun: объявленные сигнатуры
 
 ```lisp
-(FFI-LOAD "libm.so.6")
-(FFI-DEFUN "pow" c-pow "f64" (x: f64 y: f64))   ;; C-имя, лисп-имя, возврат, аргументы
-(c-pow 2.0 3.0)                                  ;; → 8.0 — вызов как обычной функции
+(ffi-load "libm.so.6")
+(ffi-defun "pow" c-pow f64 (x f64 y f64))
+(c-pow 2.0 3.0)             ; → 8.0 — вызов как обычной функции
 ```
 
-Форма `(FFI-DEFUN "C-имя" bind "ret" (a: t1 ...))`: C-имя — строка (регистр важен!), `bind` — лисп-имя, далее тип возврата и список аргументов `имя: тип`. `dlsym` выполняется при объявлении: **нет символа — ошибка на определении**, неизвестный тип — ошибка. Под капотом — примитив `FFI-INVOKE` (тело формы).
+Форма `(ffi-defun "C-имя" lisp-имя ret-type (arg type …))`:
 
-`FFI-DEFUN` создаёт **функцию-значение**: `(type-of c-pow)` → `FUNCTION`, `(functionp c-pow)` → `t`. Сигнатура живёт в форме-мастере (мастер авторитетен, образ её переносит) — переопределение, JIT и образы видят одно и то же.
+- C-имя — строка, **регистр важен**;
+- `ret-type`/`type` — `f64 f32 i64 u64 i32 u32 i16 u16 u8 ptr string void`;
+- `void` — только в возврате;
+- символ ищется в уже загруженных библиотеках (`dlsym`); нет символа — ошибка на объявлении.
 
-Типы аргументов проверяются **строго**, без сниффинга, диапазоны ширины — как у typed-полей структур; арность проверяется в обе стороны:
+`ffi-defun` регистрирует обычный callable; checker видит `:flonum`/`:fixnum`/`:ptr`/`:string`/`:nil`. Типы проверяются строго, без сниффинга; арность проверяется в обе стороны.
 
 ```lisp
-(c-pow 2 3.0)              ;; fixnum во float-месте — ошибка
-(c-ldexp 1.0 2.0)          ;; flonum в int-месте — ошибка
-(c-ldexp 1.0 4294967296)   ;; 2^32 в i32-месте — ошибка (диапазон ширины)
-(c-pow 2.0)                ;; мало аргументов — ошибка
-(c-pow 2.0 3.0 4.0)        ;; много аргументов — ошибка
-(c-free 123)               ;; fixnum в ptr-месте — ошибка
-(FFI-DEFUN "nope_xyz_fn" c-nope-xyz "void" ())   ;; нет символа — ошибка на определении
-(FFI-DEFUN "fabs" c-bad "void" (x: nosuchtype))  ;; неизвестный тип — ошибка
+(ffi-defun "sqrtf" c-sqrtf f32 (x f32))
+(ffi-defun "ldexp" c-ldexp f64 (x f64 n i32))
+(ffi-defun "strlen" c-strlen i64 (s ptr))
+(ffi-defun "free"   c-free   void (p ptr))
+
+(c-sqrtf 9.0)    ; → 3.0
+(c-ldexp 1.5 2)  ; → 6.0 — f64 (SSE) + i32 (INT)
+(c-strlen "hello") ; → 5 — строка как char*
+(c-free nil)     ; → nil — void-возврат; nil же и NULL для ptr
+(c-pow 2.0)      ; → RuntimeError — мало аргументов
 ```
 
-Возвраты: числа, `ptr`, `string`, `void`. Строки в `ptr`-местах идут как `char*`, u8-тензоры — как буферы; память арендуется **на время вызова** — C не должен удерживать указатель. `nil` в `ptr`-месте — это `NULL`.
+> 🐍 Как `ctypes.CDLL(...)` с назначенными `argtypes`/`restype`, только ошибки типа приходят до вызова C и являются типизированными `RuntimeError`, а объявления живут в форме-мастере.
 
-```lisp
-(FFI-DEFUN "sqrtf" c-sqrtf "f32" (x: f32))
-(FFI-DEFUN "ldexp"  c-ldexp  "f64" (x: f64 n: i32))
-(FFI-DEFUN "strlen" c-strlen "i64" (s: ptr))
-(FFI-DEFUN "strchr" c-strchr "string" (s: ptr c: i32))
-(FFI-DEFUN "free"   c-free   "void" (p: ptr))
+### 16.4.3 Таблица C-типов
 
-(c-sqrtf 9.0)          ;; → 3.0
-(c-ldexp 1.5 2)        ;; → 6.0 — f64 (SSE) + i32 (INT): регистры по классам аргументов
-(c-strlen "hello")     ;; → 5 — строка как char*
-(c-strchr "hello" 101) ;; → "ello" — char* возвращается строкой
-(c-free nil)           ;; → nil — void-возврат; nil же и NULL для ptr-мест
-```
-
-> 🐍 **Python-аналогия.** `ctypes.CDLL("libm.so.6")` с назначенными `argtypes`/`restype` — только проверки происходят до C, а ошибка приходит структурой от трейта `ERROR` (гл. 15.7), и объявления живут в форме-мастере, а не в питоновском классе.
-
-### Таблица C-типов
-
-Типы сигнатур — единая таблица (`ctype_by_name` в `src/mop`):
-
-| Тип в сигнатуре | C-тип | Марширование |
+| Тип в сигнатуре | C-тип | Маршалирование |
 |---|---|---|
-| `byte` (он же `u8`) | `uint8_t` | raw 0..255 |
-| `i16` / `u16` | `int16_t` / `uint16_t` | диапазон ширины проверяется |
-| `i32` / `u32` | `int32_t` / `uint32_t` | диапазон ширины проверяется |
-| `i64` / `u64` | `int64_t` / `uint64_t` | диапазон ширины проверяется |
-| `f32` | `float` | конвертация `cvtsd2ss`/`cvtss2sd` |
-| `f64` | `double` | |
-| `ptr` | `void*` | ptr-атом, `nil` = `NULL`; строка — `char*`; u8-тензор — буфер |
-| `string` | `char*` | только возврат: `char*` читается строкой |
-| `void` | `void` | только возврат: даёт `nil` |
+| `u8` | `uint8_t` | `:fixnum`, диапазон 0..255 |
+| `i16` / `u16` | `int16_t` / `uint16_t` | `:fixnum`, проверка ширины |
+| `i32` / `u32` | `int32_t` / `uint32_t` | `:fixnum`, проверка ширины |
+| `i64` / `u64` | `int64_t` / `uint64_t` | `:fixnum` (u64 ≤ max i64) |
+| `f32` | `float` | `:flonum`, `movss` |
+| `f64` | `double` | `:flonum`, `movsd` |
+| `ptr` | `void*` | `:ptr`, `nil` = NULL, `:string` = временный NUL-терминированный буфер в scratch |
+| `string` | `char*` | аргумент: `:string`/`nil`; возврат: копия C-строки в scratch, NULL → `""` |
+| `void` | `void` | только возврат: `nil` |
 
-Диапазоны целых ширин — общий `ctype_check_int` с полями структур; на границе проверяются и тип, и диапазон, ошибки — структуры от трейта `ERROR`.
+Ошибки типа/диапазона — `RuntimeError`. Возврат `ptr` — `:ptr` или `nil` для NULL.
 
-### Трамплин ABI: SysV x86-64
+### 16.4.4 Трамплин ABI
 
-Один W^X-stub на сигнатуру (copy-and-patch, кэш живёт до конца процесса); никакого libffi — зависимостей нет, трамплин общий для всех языков проекта.
+`FfiArgs { ints[6], sses[8], target, ret_i }` — ABI-блок, общий для обеих ОС (массивы хранят значения по классу, а не по позиции).
 
-- **SysV x86-64**: регистры по классам аргументов — 6 целых + 8 SSE, переполнение уходит на стек (седьмой целый аргумент едет по стеку — проверено на `syscall(39)` = `getpid`).
-- Возврат `f32`/`f64` сворачивается в `rax`.
-- Байты кодогена сверены с gcc+objdump.
+| ОС | Распределение аргументов |
+|---|---|
+| Linux / SysV | int → `rdi,rsi,rdx,rcx,r8,r9`; float → `xmm0..xmm7`; ≥6 int или ≥8 SSE — отказ |
+| Windows / Win64 | регистры выбираются **по позиции аргумента**: i<4 → i-й регистр своего класса (`rcx/rdx/r8/r9` либо `xmm0..xmm3`); i≥4 → стек `[rsp+32+8*(i-4)]`, 32 байта shadow space, кадр выровнен по 16 |
 
-На Windows трамплин **не построен**: `FFI-LOAD` работает (загрузка библиотеки и `GetProcAddress`), но `FFI-DEFUN` и сам вызов падают `EXCEPTION_ACCESS_VIOLATION`. Win64-ABI (пролог/эпилог, 32 байта shadow space, home-слоты для float-аргументов ≥ 5) реализован для нативных страниц JIT и HLO-ядер — это отдельный путь (гл. 10, 20), а не FFI-трамплин.
+Ловушка Win64:
+- `(f64, u64)` → `xmm0` + `rcx`;
+- `(u64, f64)` → `rcx` + `xmm1` (xmm0 при этом мусор).
 
-### FFI-DEFSTRUCT: C-структуры
+Генерируемый код: `push rbx; mov rbx,rdi` → аргументы → `call [target]` → возврат (`rax` для int/ptr, `xmm0` → `ret_i` для f32/f64 через `movq`/`movss`) → `pop rbx; ret`. Проверено под Wine на `kernel32` (`GetCurrentProcessId`, `lstrlenA`, `MultiByteToWideChar` с 6 аргументами), `msvcrt pow` и сгенерированных DLL со смешанными и стековыми аргументами. Тесты: 834 на Linux и 834 на Windows (3 POSIX-FFI пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы).
 
-```lisp
-(FFI-DEFSTRUCT fs-pad (a: byte b: f64))   ;; C-layout: выравнивание и padding как в C
-(FFI-OFFSET 'fs-pad 'a)                   ;; → 0 — byte-смещение поля
-(FFI-OFFSET 'fs-pad 'b)                   ;; → 8 (padding после byte)
-(FFI-SIZE 'fs-pad)                        ;; → 16 — sizeof
+| Ограничение | Комментарий |
+|---|---|
+| Нет variadic C-функций | `printf` и т.п. не вызываются |
+| Нет структур по значению, union, callbacks | только number/ptr/string/void |
+| Временные строки | C не должен удерживать указатель после вызова |
+| Только top-level | `ffi-load`/`ffi-defun` не работают в `future`/`eval` |
+| Образы | FFI-функции не сериализуются в образ |
+
+> 🐍 Win64-трамплин — это та же «таможня», что `ctypes`, только правила рассадки регистров задаются позицией аргумента, а не его классом; в SysV наоборот.
+
+## 16.5 QSRD v1 / Q2 — бинарная сериализация
+
+QSRD — собственный бинарный формат Qualisp: **v1 с таблицей секций** и расширением Q2 (секция `model`).
+
+```text
+0    4   "QSRD"
+4    2   major            // несовместимое изменение кодирования значений
+6    2   minor            // добавленные секции; читатель обязан их пропускать
+8    4   flags            // bit0: little-endian
+12   4   section_count
+16   …   section_count × { u32 kind, u32 offset, u32 length, u32 crc32 }
+…        payload секций
 ```
 
-Раскладка — по правилам C: поле стоит по своему выравниванию, размер блока кратен максимальному выравниванию, padding — как в C. Поля — **только C-типы** (boxed-поле — ошибка). Доступ — обычные typed-поля: конструктор-функция, `slot-value`/`set-slot`, и диапазоны, и типы действуют так же, как в обычных структурах.
-
-| Структура | Поля | Смещения | `sizeof` |
+| kind | имя | статус | содержимое |
 |---|---|---|---|
-| `fs-pair` | `x: f64 y: f64` | 0, 8 | 16 |
-| `fs-pad` | `a: byte b: f64` | 0, 8 | 16 |
-| `fs-two` | `a: f32 b: f32` | 0, 4 | 8 |
-| `fs-mix` | `a: i16 b: byte` | 0, 2 | 4 (выравнивание 2) |
-| `fs-wide` | `a: u64 b: u8 c: u64` | 0, 8, 16 | 24 |
+| 1 | `meta` | есть | генератор, major/minor |
+| 2 | `symbols` | есть | `u32 count`, затем `u32 len + байты` |
+| 3 | `forms` | есть | `u32 count`, затем формы определений по порядку |
+| 4 | `data` | есть | `u32 count`, затем `(u32 symbol-index, value)` |
+| 5 | `model` | есть (Q2) | `u32 count`, затем `(symbol-index, tensor)` + одно значение состояния |
 
-`ptr`-поле пишется указателем или `nil` (это `NULL`), читается атомом `ptr`. Проверки границ живут и в C-структурах:
+crc32 на секцию → `CorruptImage`; неизвестные секции пропускаются (механизм minor-совместимости); символы хранятся один раз, значения ссылаются по `u32`-индексу. Поток значений — теги `nil/t/int/float/char/symbol/string/cons/tensor/struct/result/ref/func`; `ref` даёт общие и циклические структуры.
+
+### Образ пользовательского мира
 
 ```lisp
-(FFI-DEFSTRUCT fs-img (rows: i32 cols: i32 data: ptr))
-
-(let ((p (fs-img 1 2 nil)))
-  (set-slot p 'rows 2147483648)   ;; вне диапазона i32 — ошибка
-  (set-slot p 'rows 1.5)          ;; не тот тип — ошибка
-  (set-slot p 'data (FFI-ADDR p)) ;; ptr-поле принимает указатель
-  (set-slot p 'data nil))         ;; и nil (= NULL)
+(defstruct pt ((x :fixnum) (y :fixnum)))
+(defun inc (x :fixnum) :fixnum (+ x 1))
+(defvar base :fixnum 10)
+(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
+(defvar add (:func (:fixnum) :fixnum) (let ((k base)) (lambda (x :fixnum) :fixnum (+ x k))))
+(defvar p (:struct pt) (pt 3 4))
+(defvar items (:list :fixnum) (list 1 2 3))
+(save-image "@OUT@")
 ```
 
-> 🐍 **Python-аналогия.** `class S(ctypes.Structure): _fields_ = [("a", ctypes.c_uint8), ("b", ctypes.c_double)]`; `FFI-SIZE` ≈ `ctypes.sizeof(S)`, `FFI-OFFSET` ≈ `S.b.offset`, доступ к полям — как к атрибутам, только через `slot-value`/`set-slot`.
+Сериализуются: глобальные `defvar`-значения, мастер-формы `defun`/`defgraph`/`defuse`/макросов, определения структур/трейтов, тензоры (dtype+shape+байты), списки/строки/символы по именам, result, общие и циклические ссылки через memo/`ref`. Замыкания — мастер-форма лямбды + имена захватов + env, восстановление через `(let ((capture value)…) lambda)`. Никогда не сериализуются: JIT-страницы, скомпилированные HLO-графы, планы `ns-if`, `future`, сырые `:ptr` → `UnsupportedValue`.
 
-### FFI-ADDR / FFI-OFFSET / FFI-SIZE
+### Веса: save-weights / load-weights
 
-| Форма | Что делает |
+Q2 — секция `model`:
+
+```lisp
+(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
+(defvar b (:tensor :f32 (1)) (param (tensor (0.5))))
+(save-weights "@OUT@" (list 7 8))
+```
+
+- `(save-weights path [state])` пишет QSRD только с `meta`, `symbols`, `model`; параметры — стабильные тензоры с `requires_grad` в порядке `SymbolId`; `state` — произвольные данные (шаг, lr, seed), схему формат не навязывает.
+- `(load-weights path)` заменяет одноимённые биндинги и возвращает состояние как `:syntax`; сначала валидируются **все** параметры (неизвестное имя / несовпадение dtype-формы → ошибка без частичного применения); замыкания в состоянии → `UnsupportedValue`.
+
+```lisp
+(write-to-string (load-weights "/tmp/opencode/weights.qsrd"))  ; → "(7 8)"
+```
+
+**`qsrd-save`/`qsrd-load` в релизе нет** — это `unknown function`. Рабочие точки входа — `save-image`/`load-image` и `save-weights`/`load-weights`.
+
+### Инструмент `tools/qsrd` (Rust)
+
+Читатель формата на Rust: `inspect`, `verify`, `cat`, `params`, `symbols`, `extract`. Конформанс-корпус (`tools/qsrd/corpus/basic.qlsp`, `weights.qlsp`) и `check.sh` сверяют вывод. Исходник читателя в снапшоте релиза отсутствует — описание CLI берётся из SPEC; готовые бинари есть только у `qprof`.
+
+> 🐍 `save-image` ≈ `pickle.dump`, `save-weights` ≈ `torch.save(model.state_dict())`, а `tools/qsrd verify` ≈ утилита проверки контрольных сумм архива: формат сам несёт crc32 и версию секций.
+
+## 16.6 CLI, аргументы и трассировка
+
+Раздел сохраняет номер описания embedding C API; в 0.19.15 вместо C-хоста — CLI и внешние инструменты.
+
+```text
+usage: qualisp [--trace <file.json>] [script.qlsp [args...]]
+```
+
+| Формы/флаги | Поведение |
 |---|---|
-| `(FFI-ADDR st)` | `ptr`: адрес блока C-структуры |
-| `(FFI-ADDR st 'field)` | `ptr`: адрес поля — для out-параметров C |
-| `(FFI-OFFSET 'st 'field)` | byte-смещение поля (как `offsetof`) |
-| `(FFI-SIZE 'st)` | размер блока (как `sizeof`) |
+| `--version` | `qualisp 0.19.15`, exit 0 |
+| `--help`, `-h`, `-v` | usage + `error: BadArguments`, exit 1 |
+| `--trace` без файла | `BadArguments` |
+| произвольный аргумент до скрипта | `BadArguments` |
+| нет скрипта | REPL: баннер `Qualisp`, промпт `> `, продолжение `... `; `quit` и `(exit)` — не команды |
+| файловый раннер | не печатает результат последней формы — только явный `print` |
 
-`(type-of (FFI-ADDR p))` → `PTR`; указатели сравниваются по адресу. Out-параметры — u64-поле C-структуры плюс его адрес через `FFI-ADDR`.
+Ошибка при исполнении файла: `path:line:col: message` из diag, иначе `place: message` из `error_location`, иначе `error: …`.
 
-### Приёмка: zlib round-trip
+Профайлер — **инструмент, не фича языка**: форм `profile-start`/`profile-stop` нет, включение только извне:
 
-Настоящая C-библиотека через объявленные сигнатуры — compress/uncompress round-trip на байтах: u8-тензоры как буферы, u64-поле как out-параметр:
-
-```lisp
-(FFI-LOAD "libz.so.1")
-(FFI-DEFUN "compressBound" c-compress-bound "u64" (n: u64))
-(FFI-DEFUN "compress" c-compress "i32"
-           (dst: ptr dst-len: ptr src: ptr src-len: u64))
-(FFI-DEFUN "uncompress" c-uncompress "i32"
-           (dst: ptr dst-len: ptr src: ptr src-len: u64))
-
-(FFI-DEFSTRUCT zl-len (n: u64))    ;; uLongf* — out-параметр
-
-(defvar src (TENSOR-U8 (tensor ((104 101 108 108 111 32 119 111 114 108 100)))))
-(defvar dst (TENSOR-U8 (ZEROS (list 64))))
-(defvar ln (zl-len 64))            ;; до вызова — доступный размер, после — фактический
-
-(c-compress dst (FFI-ADDR ln 'n) src 11)   ;; → 0 (Z_OK)
-(slot-value ln 'n)                          ;; → размер сжатого
+```bash
+$ qualisp --trace trace.json script.qlsp
+$ qprof trace.json --top 10
+name                          calls       total_us        self_us   self%
+FIB                           21891      1867136.0       152565.0  100.0%
 ```
 
-Полный round-trip (`c-uncompress` обратно в буфер 11 байт) восстанавливает байты бинарно; маленький буфер даёт ненулевой код ошибки, а не краш. Всё то же самое работает из JIT-кода.
+Пишется Chrome Trace JSON: события `B`/`E`, микросекунды, `pid=1,tid=1`; трасса пишется и при ошибке. Инструментированы только невидимые из AST точки — границы вызовов функций, вызов HLO-графа, фаза `ns-if`. Компиляция JIT-страницы входит в inclusive-время первого вызова. Агрегатор `tools/qprof` на Rust: `qprof <trace.json> [--top N]`; без аргументов — `usage: qprof <trace.json> [--top N]` (exit 2), `qprof --help` трактует флаг как файл.
 
-### Вызовы FFI из JIT-кода
-
-Вызовы FFI-DEFUN компилируются: паритет с интерпретатором, цепочки FFI-вызовов, вызовы в циклах:
-
-```lisp
-(let ((f (lambda (x) (c-pow (c-fabs x) 2.0))))
-  ((JIT f) -3.0))   ;; → 9.0 — цепочка FFI-вызовов в jit
-```
-
-### Известные ограничения FFI
-
-- Колбэков C→Lisp во FFI нет: вызов идёт только из Lisp в C. Колбэк-примитив есть в embedding API — `qualisp_register_prim` (16.6).
-- Динамического вызова по указателю без объявленной сигнатуры нет: рабочий путь — `FFI-LOAD` плюс `FFI-DEFUN`.
-- На Windows трамплин строится по SysV: `FFI-LOAD` работает, `FFI-DEFUN` и вызов падают `EXCEPTION_ACCESS_VIOLATION`.
-- У JIT-страниц и HLO-ядер нет `.pdata`: исключение не должно пересекать нативный кадр. Фасады `call_value`/`rest_list` ловят его и возвращают bail-токен, но это инвариант, а не проверка.
-- Кэши dlsym/сигнатур/трамплинов процессные: после `LOAD-IMAGE` `FFI-DEFUN` нужно переобъявить (как `FFI-LOAD`).
-
-## 16.5 QSRD v2 — бинарная сериализация
-
-QSRD — собственный бинарный формат Qualisp для персистенции данных. Формат v2 кладёт в поток блобы:
-
-- Блоб типа `2` — S-выражение в бинарной сериализации (cons-ячейки, символы, числа, строки).
-- Блоб типа `3` — типизированный тензор (dtype сохраняется вместе с шейпом и данными).
-
-Магический заголовок: `"QSRD"` + u16 версия. Верхний уровень — **список данных**: пары ключ-значение, где ключ — символ или строка, а значение — S-выражение, число, строка или тензор.
-
-```lisp
-;; Сохранить данные: имя слоя → слой, имя активации → символ
-(defvar model (list "l1" (linear 1 4) "act" 'relu "l2" (linear 4 1)))
-;; ... обучить ...
-(qsrd-save "model.qsrd" model)
-
-;; Загрузить
-(defvar loaded (qsrd-load "model.qsrd"))   ;; → список пар
-(qsrd-get loaded "l1")                     ;; → слой (LINEAR w b)
-(qsrd-get loaded "act")                    ;; → RELU
-```
-
-Ключи строковые и символьные не смешиваются: `(qsrd-get loaded 'l1)` после строкового `"l1"` даст `nil`.
-
-Примитивы (`prim_qsrd_save`/`prim_qsrd_load`/`prim_qsrd_get` в `src/eval/interpreter.cpp:3942-3944`).
-
-> 🐍 **Python-аналогия.** `pickle.dump/load` в Python. Главное отличие: QSRD v2 хранит **dtype тензора** нативно (F16/F32/F64/I32/I64/U8) — `pickle` теряет эту информацию (приходится отдельно вызывать `torch.save` + `np.save` или передавать через `protocol=2`/`5`). DL-модель сохраняется как обычные cons-ячейки, без отдельного протокола: список слоёв кладётся в список данных, и имена слоёв становятся ключами.
-
-### Тензоры на любой глубине
-
-Тензор — данные **где угодно в структуре**: тег `6` кодируется в любой позиции cons-дерева (dtype + ndim + dims + raw-элементы), круговой рейс сохраняет dtype (включая F16), shape и значения; на любой глубине и рядом со скалярами/символами/строками. Модель (список слоёв с весами, положенный в список данных) сохраняется целиком — вместе с символами активаций.
-
-```lisp
-(defvar model (list "layer-1" (ones (list 2 2)) "layer-2" (ones (list 2 1))))
-(qsrd-save "model.qsrd" model)
-(defvar back (qsrd-load "model.qsrd"))
-(tensor-shape (qsrd-get back "layer-1"))   ;; → (2 2) — веса слоя по имени
-```
-
-### Чекпоинт обучения: веса и состояние Adam
-
-Веса и состояние оптимизатора — обычные данные, поэтому QSRD переносит обучение между процессами целиком. Состояние Adam на параметр — это `(m v step)`; собирает и разбирает его модуль `dl` (`adams-snapshot`/`adams-restore!`):
-
-```lisp
-(defvar w (param (randn (list 2 2))))
-;; ... шаги обучения: (GRAD! loss), затем (ADAM-STEP w lr) — в одной форме ...
-(qsrd-save "model.qsrd"
-           (list "w" w "state" (adams-snapshot (list w))))
-
-;; следующий процесс
-(defvar ckpt (qsrd-load "model.qsrd"))
-(defvar w (param (qsrd-get ckpt "w")))
-(adams-restore! (qsrd-get ckpt "state") (list w))
-(ADAM-STATE w)                     ;; → (m v step) — момент, дисперсия и номер шага на месте
-```
-
-`adams-snapshot` возвращает список состояний в порядке параметров, `adams-restore!` принимает снимок и список параметров и падает, если длины не совпадают. Продолжение из чекпоинта совпадает с непрерывным прогоном: веса, моменты и номер шага те же.
-
-### Что хранится в QSRD v2
-
-| Тип | Как кодируется |
-|---|---|
-| Список данных (верхний уровень) | пары ключ-значение: ключ — символ или строка, значение — любой тип из таблицы |
-| S-выражение (cons) | rec-обход cons-дерева с длинами |
-| Число fixnum | int64 little-endian |
-| Число flonum | IEEE 754 double |
-| Строка | u32 length + bytes |
-| Символ | intern-id (lookup в symbol-table) |
-| Тензор (верхний уровень и любая вложенность) | тег `6`: dtype (u8) + ndim (u32) + dims (u32) + data (raw bytes) |
-| NIL | один байт 0x00 |
-| T | один байт 0x01 |
-
-### Use cases
-
-- Сохранение/загрузка обученных DL-моделей.
-- Передача данных между процессами (с `--binary-mode` qvalent).
-- Снапшоты rule engine (факты, правила).
-- Кэш промежуточных вычислений в long-running пайплайнах.
-
-### Известные ограничения
-
-- Верхний уровень — список данных (пары ключ-значение), где ключ — символ или строка: запись без ключа (например, `(list 1 2 3)`) молча не сохраняется, а не-список `QSRD-SAVE` отвергает («second arg must be data list»).
-- Нет версионирования схемы внутри блоба — добавление нового типа меняет формат.
-- Нет сжатия (только raw bytes) — для больших моделей используйте внешний `.tar.gz`.
-- Не читается из других языков напрямую — нужен отдельный reader (формат документирован, но reference-парсера на Python нет).
-
-## 16.6 Embedding C API: C зовёт Lisp
-
-Обратная сторона FFI — библиотека `qualisp-core` с заголовком `qualisp.h`: C/C++-хост встраивает интерпретатор и зовёт Lisp напрямую. Маршалинг значений — та же «таможня», что и на FFI-границе, только в обратную сторону.
-
-### Жизненный цикл и вычисление
-
-| Функция | Что делает |
-|---|---|
-| `qualisp_open` | создать интерпретатор |
-| `qualisp_load_stdlib` | загрузить стандартную библиотеку |
-| `qualisp_close` | уничтожить интерпретатор |
-| `qualisp_error` | текст последней ошибки |
-| `qualisp_eval` | вычислить выражение |
-| `qualisp_call` | вызвать функцию с аргументами |
-
-### Значения: конструкторы, предикаты, аксессоры
-
-| Роль | Функции |
-|---|---|
-| конструкторы | `qualisp_nil`, `qualisp_int`, `qualisp_float`, `qualisp_string`, `qualisp_list` |
-| предикаты | `qualisp_is_int`, `qualisp_is_float`, `qualisp_is_string`, `qualisp_is_tensor`, `qualisp_is_nil` |
-| аксессоры | `qualisp_as_int`, `qualisp_as_float`, `qualisp_as_string` |
-
-### Тензоры
-
-- `qualisp_tensor_wrap` — **borrowed**-тензор над буфером хоста: данные не копируются, лисп работает с памятью хоста (сценарий «буфер → лисп → буфер»);
-- `qualisp_tensor_data` — доступ к данным тензора из C.
-
-### Глобалы и примитивы хоста
-
-- `qualisp_set_global` / `qualisp_get_global` — запись и чтение Lisp-глобалов из хоста;
-- `qualisp_register_prim` — C-функция регистрируется как примитив Lisp. Это и есть колбэк C→Lisp: во FFI колбэков нет, в embedding API они есть.
-
-### Контракт ошибок и владения
-
-- **C++-исключения не пересекают границу API.** Каждый вход ловит их и кладёт текст в `qualisp_error` — хост всегда возвращается в нормальное состояние и читает причину одной функцией.
-- **Значения хоста живут до `qualisp_close`.**
-- **Результаты `qualisp_eval`/`qualisp_call` клонируются в stable.** Scratch-арена формы умирает по её границе, поэтому результат переживает возврат из `eval`/`call` и остаётся валидным для хоста (правило «значение живёт в scope'е своего хранилища» — гл. 5).
-
-> 🐍 Как встраивание CPython (`Python.h`: `Py_Initialize` → `PyRun_SimpleString` → `Py_Finalize`), только API маленькое, значения — те же, что и на FFI-границе, а ошибка не требует разбора исключений: текст всегда в `qualisp_error`.
+> 🐍 `qualisp --trace` + `qprof` ≈ `python -m cProfile script.py` и `pstats.Stats(...).sort_stats('tottime').print_stats(10)`: профиль включается снаружи, а не директивами в исходнике.

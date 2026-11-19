@@ -1,200 +1,264 @@
 # Глава 9. Классический ML (модуль ML)
 
-Модуль `ML` — встроенный «мини-scikit-learn»: утилиты, ядра, метрики, препроцессинг, KNN, наивный Байес, деревья, ансамбли, K-Means, кросс-валидация и grid search. Всё реализовано на самом Qualisp (см. `stdlib/ml.qlsp`) — хороший материал для изучения языка.
+Модуль `ML` — небольшая типизированная библиотека метрик и подготовки данных. Весь его код лежит в `src/stdlib/ml.qlsp` и написан на самом Qualisp: это удобный материал для чтения — каждая функция видна целиком, без магии и скрытых слоёв.
 
 ```lisp
 (import ML)
 ```
+
+Важно понимать границы модуля: `ml` считает **метрики** по спискам и одному 1-D тензору и **готовит данные** (разбиение, масштабирование). Готовых моделей KNN, деревьев решений, случайных лесов, градиентного бустинга, K-Means, а также функций `cross-val-score` / `grid-search` в нём нет: обучение моделей — зона модуля `dl` (гл. 8), а кросс-валидацию и перебор гиперпараметров вы собираете из примитивов сами (§9.10). Экспорты перечислены в конце исходника: `mean`, `mse`, `mae`, `rmse`, `accuracy`, `train-part`, `test-part`, `minmax-scale`, `standardize`, `t-mse`, `precision`, `recall`, `f1`.
 
 ## 9.1 Утилиты для списков
 
-```lisp
-(range n)                       ;; → (0 1 ... n-1)        range(n)
-(range n start step)            ;; → (start start+step ...), start/step с &optional
-(take 2 '(1 2 3))               ;; → (1 2)                lst[:2]
-(drop 2 '(1 2 3))               ;; → (3)                  lst[2:]
-(unique '(1 1 2))               ;; → (1 2)                set-подобно
-(mean '(1 2 3))                 ;; → 2                    statistics.mean
-(zip-with + '(1 2) '(10 20))    ;; поэлементный zip
-(map fn xs)                     ;; → список результатов fn
-(filter pred xs)                ;; → список x где (pred x)
-(reduce + '(1 2 3 4))           ;; → 10
-(majority-vote xs)              ;; → большинство (для ансамблей)
-```
-
-`range`, `take`, `drop`, `zip-with` (и `map`/`filter` из `collections`) — итеративные обходы: глубина стека не зависит от длины списка, поэтому `(range 100000)` или `(map f xs)` над длинным списком не упираются в стек.
-
-## 9.2 Ядра (kernels)
-
-Имена из `stdlib/ml.qlsp`:
+Базовые обходы списков — примитивы языка, они доступны без импорта и работают с явно типизированными функциями:
 
 ```lisp
-(linear-kernel x1 x2)                       ;; ⟨x1, x2⟩
-(poly-kernel x1 x2 degree coef0)            ;; (⟨x1,x2⟩+coef0)^degree
-(rbf-kernel x1 x2 gamma)                    ;; exp(-γ‖x1−x2‖²)
-(sigmoid-kernel x1 x2 alpha coef0)          ;; tanh(⟨x1,x2⟩·alpha+coef0)
+(map (lambda (x :fixnum) :fixnum (* x x)) (list 1 2 3))     ;; → (1 4 9)
+(filter (lambda (x :fixnum) :bool (> x 1)) (list 1 2 3))     ;; → (2 3)
+(reduce (lambda (a :fixnum b :fixnum) :fixnum (+ a b)) (list 1 2 3) 0) ;; → 6
+(take 2 (list 1 2 3))                                        ;; → (1 2)
+(drop 2 (list 1 2 3))                                        ;; → (3)
 ```
 
-> 🐍 Это ядра из `sklearn.metrics.pairwise` / `sklearn.svm`. NB: `sigmoid-kernel` использует имена `alpha coef0`, а не `a c`.
+`map`, `filter`, `reduce` — итеративные примитивы: глубина стека не зависит от длины списка, поэтому `(map f xs)` на длинном списке не упирается в кадры вызовов.
 
-Дистанции:
+Модуль `COLLECTIONS` добавляет поверх примитивов типизированные утилиты; `range` и часть функций возвращают `option`, потому что пустого списка в языке нет:
 
 ```lisp
-(euclidean-dist a b)         ;; sqrt(Σ(aᵢ-bᵢ)²)
-(manhattan-dist a b)         ;; Σ|aᵢ-bᵢ|
+(import COLLECTIONS)
+
+(range 5)          ;; → (0 1 2 3 4)
+(range 0)          ;; → nil — пустой диапазон
+(sum (list 1 2 3)) ;; → 6
+(unique (list 1 1 2 3 2)) ;; → (1 2 3)
+(zip-with (lambda (a :fixnum b :fixnum) :fixnum (+ a b))
+          (list 1 2) (list 10 20))          ;; → (11 22)
+(find (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))      ;; → 3
+(position (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))  ;; → 2
 ```
 
-## 9.3 Метрики
+`range` строит список хвостовой рекурсией по `:fixnum` (`range-from` в `collections.qlsp`), а не обходом cons-цепочки. Полный список экспорта `collections`: `sum`, `keep-positive`, `any`, `all`, `count-if`, `last`, `range`, `find`, `position`, `take-while`, `drop-while`, `zip-with`, `member?`, `unique`.
+
+> 🐍 `range(n)` ≈ `list(range(n))`; `zip-with` ≈ `map(f, xs, ys)`; `sum`/`unique` ≈ `sum(xs)` / `list(dict.fromkeys(xs))`. Разница в типах: пустой результат — `nil`, а не `[]`, поэтому у функций, которые могут вернуть пустоту, тип `(:option …)`.
+
+## 9.2 Соглашения модуля ml
+
+Три решения определяют весь API `ml` (они видны в комментариях в `ml.qlsp`):
+
+| Соглашение | Следствие |
+|---|---|
+| Метрики определены на непустом `(:list :flonum)` | Пустого списка в языке нет, деления на ноль длины не бывает |
+| `:fixnum` расширяется до `:flonum` при унификации элементов | `(mean (list 1 2 3))` типизируется без второго имени и без перегрузки |
+| Рекурсии по cons нет (`cdr` даёт option) | Всё считается через `reduce`/`map`/`nth`; рекурсивен только генератор индексов по `:fixnum` |
+
+Индексный хелпер — типичный пример:
 
 ```lisp
-(accuracy-score y-pred y-true)                  ;; → float [0,1]
-(precision-score y-pred y-true pos-label)        ;; → float [0,1]
-(recall-score y-pred y-true pos-label)           ;; → float [0,1]
-(f1-score y-pred y-true pos-label)               ;; → float [0,1]
-(confusion-matrix y-pred y-true labels)          ;; → матрица n×n
+(defun indices (i :fixnum n :fixnum) (:list :fixnum)
+  (if (< (+ i 1) n)
+      (cons i (indices (+ i 1) n))
+      (list i)))
+
+(indices 0 4)   ;; → (0 1 2 3)
 ```
 
-Аргумент `pos-label` — метка «позитивного» класса (символ/значение), обязательна для precision/recall/f1.
+Внутри `ml` он называется `indices-from`; рядом работают `sum-flonums`, `abs-flonum`, `squared-error-sum`, `check-ratio`, `ratio-count`, `check-labels`, `positive-pairs`, `false-positive-pairs`, `false-negative-pairs` — приватные хелперы, не экспортируемые наружу.
 
-> 🐍 `sklearn.metrics.accuracy_score`, `precision_score`, `recall_score`, `f1_score`, `confusion_matrix`.
+> 🐍 В Python вы написали бы `sum(xs)`, `enumerate(xs)` и `zip(...)`; здесь те же идеи выражаются через `reduce` и явный список индексов, потому что статический тип `cdr` не гарантирует существования хвоста.
 
-## 9.4 Препроцессинг и разбиение
+## 9.3 Метрики регрессии
 
 ```lisp
-(train-test-split data target ratio)    ;; → (train-d test-d train-t test-t)
-(standard-scale-lst data)               ;; z-score     StandardScaler
-(minmax-scale-lst data)                 ;; [0,1]       MinMaxScaler
+(mean (list 1.0 2.0 3.0))                         ;; → 2.0
+(mse  (list 1.0 2.0 3.0) (list 1.5 2.5 3.5))      ;; → 0.25
+(mae  (list 1.0 2.0 3.0) (list 1.5 2.5 3.5))      ;; → 0.5
+(rmse (list 1.0 2.0 3.0) (list 1.5 2.5 3.5))      ;; → 0.5
 ```
 
-NB: `standard-scale-lst` и `minmax-scale-lst` работают над **плоским списком чисел** (одна колонка): для матрицы применяйте их к нужной колонке, а не к списку строк.
+| Функция | Сигнатура | Смысл |
+|---|---|---|
+| `mean` | `(:list :flonum) → :flonum` | среднее арифметическое |
+| `mse` | `(:list :flonum) (:list :flonum) → :flonum` | средний квадрат ошибки |
+| `mae` | `(:list :flonum) (:list :flonum) → :flonum` | средняя абсолютная ошибка |
+| `rmse` | `(:list :flonum) (:list :flonum) → :flonum` | `sqrt` от `mse` |
 
-NB: `train-test-split` в `stdlib/ml.qlsp` принимает данные и таргеты **отдельными аргументами** (см. исходник):
+Порядок аргументов у метрик — **(prediction, actual)**, то есть сначала предсказание, затем истинное значение. Разная длина входов — `throw` с сообщением вида `mse: prediction and target lengths differ`. Fixnum-списки принимаются напрямую: `(mean (list 1 2 3))` → `2.0`, `(accuracy (list 1 0 1) (list 1 1 1))` → `0.6666666666666666`.
+
+> 🐍 `statistics.mean`, `sklearn.metrics.mean_squared_error`, `mean_absolute_error`, `root_mean_squared_error`. Заметьте, что в sklearn аргументы тоже `(y_true, y_pred)` — здесь порядок обратный, и это нужно помнить при переносе кода.
+
+## 9.4 Тензорная метрика: t-mse
 
 ```lisp
-(let ((split (train-test-split X y 0.8)))
-  (let ((train-x (car split)) (test-x (cadr split))
-        (train-y (caddr split)) (test-y (cadddr split)))
-    ...))
+(t-mse (tensor (1.0 2.0)) (tensor (1.5 2.5)))   ;; → 0.25
 ```
 
-> 🐍 `train_test_split(X, y, train_size=0.8)`, `StandardScaler().fit_transform`, `MinMaxScaler()`.
-
-## 9.5 K-ближайших соседей
+Реализация в `ml.qlsp`:
 
 ```lisp
-;; x — точка, train-data — список векторов, train-labels — список меток
-(defvar pred (knn-predict x train-data train-labels k))
+(defun t-mse (pred (:tensor :f32 (_)) actual (:tensor :f32 (_))) :flonum
+  (tmean (* (- pred actual) (- pred actual))))
 ```
 
-Реализация (`stdlib/ml.qlsp:131`): считает евклидовы расстояния до всех точек, сортирует индексы (`argsort` через insert-sort), возвращает топ-k голосов.
+Вычитание и умножение здесь — elementwise broadcast, `tmean` сворачивает в `:flonum`. Ранг зафиксирован единицей: `_` — wildcard **измерения**, а не ранга, поэтому 2-D тензор в `t-mse` не типизируется. Несовпадение длин ловит тензорное ядро в рантайме.
 
-> 🐍 `KNeighborsClassifier(n_neighbors=k).fit(...).predict([x])`.
+> 🐍 `np.mean((pred - actual) ** 2)` для одномерного массива; для матриц используйте обычный `mse` над списками или свою функцию с `tmean`.
 
-## 9.6 Наивный Байес (гауссов)
+## 9.5 Метрики классификации: accuracy
 
 ```lisp
-(defvar model (nb-fit X y))          ;; → (classes priors stats)
-(defvar pred (nb-predict x model))   ;; → argmax класса
+(accuracy (list 'a 'b 'a) (list 'a 'b 'b))   ;; → 0.6666666666666666
+(accuracy (list 1 0 1) (list 1 1 1))         ;; → 0.6666666666666666
 ```
 
-> 🐍 `GaussianNB().fit(X, y).predict([x])`.
+`accuracy` параметризована типом метки: оба аргумента имеют тип `(:list :a)`, возврат — `:flonum`. Сравнение идёт через generic `equal`, поэтому метки могут быть числами, символами, строками или bool — аргумент `pos-label`, привычный по многим библиотекам, здесь не нужен. Разная длина — `throw`.
 
-## 9.7 Деревья решений
+> 🐍 `sklearn.metrics.accuracy_score(y_pred, y_true)`; поддержка произвольных меток «из коробки» совпадает.
+
+## 9.6 Precision, recall и F1
 
 ```lisp
-(defvar tree (build-tree data labels max-depth))     ;; дерево
-(defvar pred (tree-predict tree x))                   ;; предсказание
+(print (precision (list 1 0 1 0) (list 1 0 0 1)))  ;; → 0.5
+(print (recall    (list 1 0 1 0) (list 1 0 0 1)))  ;; → 0.5
+(print (f1        (list 1 0 1 0) (list 1 0 0 1)))  ;; → 0.5
 ```
 
-Жадный поиск сплита по критерию Джини: `best-split` перебирает фичи и пороги, выбирает сплит с минимальным Gini impurity.
+Все три функции принимают `(:list :fixnum)` с **бинарными метками 1/0** и возвращают `:flonum`. Внутри считаются приватные счётчики `positive-pairs` (tp), `false-positive-pairs` (fp) и `false-negative-pairs` (fn); нулевой знаменатель даёт `0.0`, а не NaN.
 
-## 9.8 Случайный лес и градиентный бустинг
+| Функция | Формула |
+|---|---|
+| `precision` | `tp / (tp + fp)` |
+| `recall` | `tp / (tp + fn)` |
+| `f1` | `2·p·r / (p + r)` |
+
+Длины проверяются хелпером `check-labels`; несовпадение — `throw`.
+
+> 🐍 `precision_score(y_pred, y_true, pos_label=1)`, `recall_score`, `f1_score`. Здесь `pos_label` зафиксирован единицей и не передаётся: для небинарной задачи кодируйте нужный класс в `1` явно.
+
+## 9.7 Разбиение на train / test
 
 ```lisp
-;; Случайный лес: бутстрэп + голосование деревьев
-(defvar forest (random-forest-fit data labels n-trees max-depth))
-(defvar pred (random-forest-predict forest x))
-
-;; Градиентный бустинг: пни (stumps) на остатках
-(defvar model (gb-fit data labels n-estimators lr max-depth))   ;; → (init trees)
-(defvar pred (gb-predict model x))
+(train-part (list 1 2 3 4 5) 0.6)   ;; → (1 2 3)
+(test-part  (list 1 2 3 4 5) 0.6)   ;; → (4 5)
+(train-part (list 1 2 3) 0.0)       ;; → nil
+(test-part  (list 1 2 3) 1.0)       ;; → nil
 ```
 
-> 🐍 `RandomForestClassifier(n_estimators=n_trees, max_depth=...)`, `GradientBoostingClassifier(n_estimators=n, learning_rate=lr, max_depth=...)`.
+Сигнатуры: `train-part : (:list :a) :flonum → (:option (:list :a))`, `test-part : (:list :a) :flonum → (:option (:list :a))`.
 
-NB: порядок аргументов в `stdlib/ml.qlsp:257` — `(data labels n-trees max-depth)` и `(data labels n-estimators lr max-depth)`. В Python sklearn — те же имена. Градиентный бустинг работает с числовыми метками: остатки считаются как вещественные значения, поэтому `(gb-fit data labels ...)` на символьных классах не стартует — кодируйте цель числом.
+`ratio` — доля **обучающей** части, обязательно из `0..1`; вне диапазона — `throw`. Число элементов `ratio·n` округляется к ближайшему целому (0.5 вверх) с допуском `1e-9`, чтобы двоичный шум вроде `0.3·10 = 2.9999999999999996` не терял элемент. Пустая часть честно возвращается как `nil` в типе `(:option (:list :a))`, а не как ошибка.
 
-## 9.9 K-Means
+> 🐍 `train_test_split(X, y, train_size=0.6)`. Отличие API: `train-part`/`test-part` принимают **один** список и число, а не `X, y`; target нужно разбивать отдельным вызовом.
+
+## 9.8 Масштабирование в [0, 1]
 
 ```lisp
-(defvar centroids (kmeans-fit data k iters))   ;; список k центроидов
-;; отнести точку к кластеру:
-(defvar cluster (nearest-centroid x centroids 0 0 -1))
+(minmax-scale (list 1.0 2.0 3.0))       ;; → (0.0 0.5 1.0)
+(minmax-scale (list 5.0 5.0 5.0))       ;; → (0.0 0.0 0.0)
 ```
 
-> 🐍 `KMeans(n_clusters=k, max_iter=iters).fit(data).cluster_centers_`.
+Функция `(minmax-scale xs (:list :flonum)) (:list :flonum)` ищет минимум и максимум через `reduce` и применяет `(x − lo) / (hi − lo)` через `map`. Вырожденный диапазон (все значения равны) отображается в нули: деление с нулевым знаменателем не определено, а `nil` выглядел бы как успех. Это то же соглашение, что у `MinMaxScaler`.
+
+Вход — **плоский список чисел**, не список строк: для таблицы применяйте функцию к нужной колонке.
+
+> 🐍 `MinMaxScaler().fit_transform(X)`; соглашение для константной колонки совпадает (нули).
+
+## 9.9 Стандартизация
+
+```lisp
+(standardize (list 1.0 2.0 3.0))   ;; → (-1.224744871391589 0.0 1.224744871391589)
+(standardize (list 5.0 5.0))       ;; → (0.0 0.0)
+```
+
+`(standardize xs (:list :flonum)) (:list :flonum)` вычитает среднее и делит на **генеральное** стандартное отклонение: делим на `n`, а не на `n − 1`, потому что метрики считаются по всему набору, а не оценивают выборку. Нулевое СКО снова даёт нули.
+
+> 🐍 `StandardScaler().fit_transform(X)` — у sklearn по умолчанию тоже генеральное СКО (`ddof=0`).
 
 ## 9.10 Кросс-валидация и подбор гиперпараметров
 
-```lisp
-;; k-fold CV: model-fn(train-x train-y) → модель с вызовом (model x)
-(defvar score (cross-val-score X y k fit-fn score-fn))
+Отдельных `cross-val-score` и `grid-search` в `ml` нет. Это не «пропущенная функция»: модуль намеренно содержит только то, что нужно для оценки и подготовки данных, — модели и оптимизаторы живут в `dl` (гл. 8). Кросс-валидацию и перебор вариантов вы пишете на обычных типизированных функциях, используя `indices`-хелпер из §9.2, `reduce`, `nth` и метрики `ml`.
 
-;; перебор параметров
-(defvar best (grid-search X y param-list fit-fn score-fn))
-```
-
-`fit-fn` — функция вида `(lambda (tx ty) (lambda (x) (majority-vote (knn-predict x tx ty 3))))`: `knn-predict` отдаёт список топ-k голосов, поэтому для метрики над одиночной меткой берём `majority-vote`.
-`score-fn` — `(lambda (preds y-true) (accuracy-score preds y-true))`.
-
-`grid-search` оценивает каждый вариант на всём `X`.
-
-> 🐍 `cross_val_score(model, X, y, cv=k)` и `GridSearchCV(...)`.
-
-### Потери и активации над списками
-
-В `ml` добавлен список-ориентированный слой потерь — удобно для символьных/нейросимвольных пайплайнов, где значения ходят списками, а не тензорами:
-
-```lisp
-(softmax-list '(1.0 2.0 3.0))       ;; → (0.0900305... 0.2447284... 0.6652409...) (max-shift, стабильно)
-(log-softmax-list '(1.0 2.0 3.0))   ;; лог-вероятности без overflow
-(mse-loss '(1.0 2.0) '(1.5 2.5))    ;; → 0.25
-(mae-loss '(1.0 2.0) '(1.5 2.5))    ;; → 0.5
-(cross-entropy-list pred target)    ;; цели — one-hot или мягкие метки
-(one-hot 1 3)                       ;; → (0.0 1.0 0.0)  (k n): единица на позиции k
-```
-
-> 🐍 `torch.nn.functional.softmax(..., dim=-1)` (max-shift внутри), `nn.MSELoss`, `nn.CrossEntropyLoss` — только над списками, а не тензорами.
-
-## 9.11 End-to-end пример
+Минимальный k-fold-счёт и перебор двух вариантов предобработки:
 
 ```lisp
 (import ML)
 
-;; датасет: 2 класса, 2 признака (данные — списки)
-(defvar data (list (list 1.0 2.0) (list 1.5 1.8) (list 5.0 8.0)
-                   (list 6.0 9.0) (list 1.2 0.6) (list 5.5 8.2)))
-(defvar labels (list 'a 'a 'b 'b 'a 'b))
+(defun indices (i :fixnum n :fixnum) (:list :fixnum)
+  (if (< (+ i 1) n) (cons i (indices (+ i 1) n)) (list i)))
 
-;; KNN с кросс-валидацией (k=3); knn-predict отдаёт топ-3, берём большинство
-(defun fit-knn (tx ty)
-  (lambda (x) (majority-vote (knn-predict x tx ty 3))))
+(defun fold-mse (xs (:list :flonum) ys (:list :flonum) k :fixnum fold :fixnum) :flonum
+  (reduce (lambda (i :fixnum acc :flonum)
+            (if (= (mod i k) fold) acc
+              (let ((d (- (nth xs i) (nth ys i)))) (+ acc (* d d)))))
+          (indices 0 (length xs)) 0.0))
 
-(defvar cv (cross-val-score data labels 3 fit-knn accuracy-score))
-(print cv)
+(defun cv-mse (xs (:list :flonum) ys (:list :flonum) k :fixnum) :flonum
+  (/ (reduce (lambda (f :fixnum acc :flonum) (+ acc (fold-mse xs ys k f)))
+             (indices 0 k) 0.0)
+     (* k 1.0)))
+
+(defun grid (xs (:list :flonum) ys (:list :flonum) k :fixnum) (:list :flonum)
+  (list (cv-mse xs ys k)
+        (cv-mse (minmax-scale xs) ys k)))
+
+(print (indices 0 5))   ;; → (0 1 2 3 4)
+(print (cv-mse (list 1.0 2.0 3.0 4.0) (list 1.5 2.0 3.0 4.5) 2)) ;; → 0.25
+(print (grid   (list 1.0 2.0 3.0 4.0) (list 1.5 2.0 3.0 4.5) 2))
+;; → (0.25 11.361111111111112)
 ```
 
-> 🐍 Эквивалент:
+`fold-mse` пропускает текущий фолд по остатку от деления индекса на `k`, `cv-mse` усредняет ошибки по фолдам, а `grid` сравнивает варианты. Второй результат больше первого: масштабирование предсказаний меняет их масштаб относительно цели — допустимый, но не лучший вариант, и перебор как раз это показывает.
+
+> 🐍 `cross_val_score(model, X, y, cv=k).mean()` и `GridSearchCV(...)` делают то же самое, но в `ml` таких обёрток нет — вы строите их из примитивов под свою модель.
+
+## 9.11 End-to-end пример
+
+Типизированный пример: считаем метрики, масштабируем и разбиваем выборку.
+
+```lisp
+(import ML)
+(import COLLECTIONS)
+
+(defun evaluate (pred (:list :flonum) y (:list :flonum)) (:list :flonum)
+  (list (mse pred y) (mae pred y) (rmse pred y)))
+
+(defun scale-split (xs (:list :flonum) ratio :flonum) (:option (:list :flonum))
+  (train-part (minmax-scale xs) ratio))
+
+(print (evaluate (list 1.0 2.0 3.0) (list 1.5 2.0 2.5)))
+;; → (0.16666666666666666 0.3333333333333333 0.408248290463863)
+
+(print (scale-split (list 1.0 2.0 3.0 4.0) 0.5))
+;; → (0.0 0.3333333333333333)
+
+(print (accuracy (list 'a 'b 'a) (list 'a 'b 'b)))
+;; → 0.6666666666666666
+```
+
+Все определения верхнего уровня аннотированы: типы параметров и возврата обязательны, `defvar` тоже требует типа. Результат `scale-split` — option-список, потому что при `ratio = 0` обучающая часть пуста.
+
+> 🐍 Эквивалент по смыслу:
 > ```python
-> from sklearn.neighbors import KNeighborsClassifier
-> from sklearn.model_selection import cross_val_score
-> model = KNeighborsClassifier(n_neighbors=3)
-> cross_val_score(model, X, y, cv=3).mean()
+> from sklearn.metrics import mean_squared_error, mean_absolute_error, accuracy_score
+> from sklearn.preprocessing import MinMaxScaler
+> from sklearn.model_selection import train_test_split
+>
+> X_scaled = MinMaxScaler().fit_transform(X)
+> X_train, _ = train_test_split(X_scaled, train_size=0.5)
+> (mean_squared_error(pred, y), mean_absolute_error(pred, y))
 > ```
 
 ## 9.12 Отличия от scikit-learn
 
-- API функциональный: `(nb-fit ...)` вместо `.fit()`/`.predict()` классов.
-- Данные — списки Qualisp (для табличных данных), тензоры — для нейросетей.
-- Реализации учебно-минималистичные: глядя в `stdlib/ml.qlsp`, вы видите каждый алгоритм целиком — это одновременно и документация, и курс по ML-алгоритмам.
-- `unique` дедуплицирует, `train-test-split` делит с заданным ratio; `cross-val-score` возвращает среднее по k фолдам.
+| Qualisp | Python | Комментарий |
+|---|---|---|
+| `(mse pred actual)` | `mean_squared_error(y_true, y_pred)` | порядок аргументов обратный |
+| `(accuracy pred actual)` | `accuracy_score(y_true, y_pred)` | метки любого атомарного типа, `pos-label` не нужен |
+| `(precision pred actual)` | `precision_score(y_true, y_pred)` | только бинарные метки 1/0 |
+| `(train-part xs ratio)` | `train_test_split(X, train_size=ratio)` | один список; target разбивается отдельно |
+| `(minmax-scale xs)` | `MinMaxScaler().fit_transform(X)` | плоский список чисел, константа → нули |
+| `(standardize xs)` | `StandardScaler().fit_transform(X)` | генеральное СКО |
+| `(t-mse p a)` | `np.mean((p - a) ** 2)` | только 1-D `:f32`-тензоры |
+| — | `KNeighborsClassifier`, `DecisionTreeClassifier`, `RandomForestClassifier`, `GradientBoostingClassifier`, `KMeans` | моделей в `ml` нет; обучение — в `dl` (гл. 8) |
+| — | `cross_val_score`, `GridSearchCV` | готовых обёрток нет; см. §9.10 |
+
+API функциональный, данные — типизированные списки Qualisp (для нейросетей — тензоры), реализации короткие и целиком видны в `src/stdlib/ml.qlsp`. Это позволяет прочитать каждый алгоритм от начала до конца, но означает, что «всё из sklearn» в модуле не ожидается.

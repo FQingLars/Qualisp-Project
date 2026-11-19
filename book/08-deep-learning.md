@@ -1,169 +1,121 @@
 # Глава 8. Глубокое обучение
 
-Глава про построение нейросетей: слои как данные, прямой проход, цикл обучения, свёрточные примитивы, нормализация, Adam-состояние.
+Глава про построение нейросетей: слои как чистые функции, прямой проход, цикл обучения, классические метрики ML и состояние оптимизаторов. Модуль `dl` (`src/stdlib/dl.qlsp`, 10 635 байт) работает поверх eager-тензоров и autograd (гл. 6–7); `ml` отвечает за оценку и подготовку данных; символьный мост `neuro` описан в гл. 14.
 
-## 8.1 Модуль `dl`: слои как данные
-
-Модуль `dl` (`stdlib/dl.qlsp`) реализует нейросеть **как данные**: модель — это обычный список, в котором слои лежат cons-ячейками, а активации — голые символы. Модель не объект, не замыкание, а значение, которое можно распечатать, сериализовать и передать куда угодно.
+## 8.1 Модуль `dl`: чистые функции над тензорами
 
 ```lisp
 (import DL)
-;;                       in    out
-(defvar model (list (linear 1 4)     ;; слой: (list 'linear W b)
-                    'relu            ;; активация: голый символ
-                    (linear 4 1)))   ;; последний слой
 ```
 
-Слой — это cons-ячейка формы `(linear W B)`, где `W` и `B` — обучаемые параметры (`PARAM`, requires_grad=true). Активации — голые символы: `'relu`, `'sigmoid`, `'tanh`, `'softmax`. Оптимизаторы — тоже символы: `'sgd`, `'adam`.
+`dl` даёт **чистые функции** над 2-D тензорами `:f32` формы «batch × features»: слой — это вызов `linear-forward`, сеть — `mlp-forward`, потери — `mse-loss`, шаг — `sgd-step`/`adam-step`. Переданные тензоры не мутируются, результат — новый тензор или новая структура.
 
-Помимо слоёв, `dl` даёт готовые дифференцируемые композиции:
+Структуры модуля (слоты — wildcard-формы `(_ _)`):
 
-| Функция | Что это |
-|---|---|
-| `sigmoid!` | `0.5 * (1 + tanh(x/2))` на Lisp |
-| `softmax!` | `TMAX`-сдвиг → `EXP!` → `SUM!` → деление |
-| `softmax` | tape-free версия для инференса |
-| `layernorm!` / `batchnorm!` | нормализации на Lisp-композициях (mean/var по осям, `gamma`/`beta` через `RESHAPE!`) |
-| `layernorm` | tape-free нормализация |
-| `dropout` | tape-free маска через `T-DETACH` |
-| `attention q k v [mask]` | одно-головное scaled dot-product attention |
-| `emb-lookup table ids` | дифференцируемая выборка строк (= `t-gather!`) |
-| `clip-grad!`, `grad-norm` | клип и норма градиента |
-| `adams-snapshot`, `adams-restore!` | снимок и восстановление состояния Adam |
+| Структура | Слоты | Смысл |
+|---|---|---|
+| `linear-model` | `w`, `b` | веса и смещение линейной модели |
+| `linear-gradients` | `dw`, `db` | замкнутый градиент линейной регрессии |
+| `adam-state` | `param`, `m`, `v`, `step` | состояние Adam |
+| `momentum-state` | `param`, `velocity` | состояние моментного SGD |
 
-Почему именно данные, а не замыкания:
+Полный список экспортов:
 
-- **HibLin-безопасность между формами.** Замыкание захватывает `w`/`b` в scratch-closure, и параметры переживают границу форм по собственным правилам. Список-структура параметризуется явно через `defvar`/промоут — и переживает границы форм по тем же правилам, что и любое другое значение.
-- **QSRD v2-сериализуемость.** Список-структура сериализуется QSRD v2 (гл. 16) — можно сохранять и загружать обученные модели как данные, без специального протокола. Тензоры весов сериализуются на **любой глубине** структуры, так что модель — alist слоёв с весами — сохраняется и загружается целиком с dtype/shape.
-- **Контракт tape.** Слои-как-данные не «прячут» узлы ленты в замыканиях — граф полностью виден в `TAPE-FORM`.
+| Функция | Что делает | Python-аналог |
+|---|---|---|
+| `linear-forward x w b` | `xW + b`, логиты | `nn.Linear` + вызов |
+| `mlp-forward x w1 b1 w2 b2` | `relu(xW₁+b₁)W₂+b₂`, логиты | `nn.Sequential(Linear, ReLU, Linear)` |
+| `mse-loss yhat y` | `tmean((yhat−y)²)` → `:flonum` | `F.mse_loss` |
+| `squared-error pred actual` | `(pred−actual)²` → `:flonum` | `(pred - actual)**2` |
+| `sgd-step w grad lr` | `w − lr·grad` | часть `optim.SGD.step()` |
+| `adam-init w` | нулевые `m`, `v`, шаг 0 | создание `optim.Adam` |
+| `adam-step st grad lr` | Adam с bias correction → новый `adam-state` | `optim.Adam.step()` |
+| `adam-param st` | параметр из состояния | `param` |
+| `adam-steps st` | номер шага → `:fixnum` | `state_dict()['step']` |
+| `momentum-init w` | нулевая скорость | создание `optim.SGD(momentum=…)` |
+| `momentum-step st grad lr momentum` | `v ← m·v + grad`, `w ← w − lr·v` | `optim.SGD(momentum=…).step()` |
+| `momentum-param st` | параметр из состояния | `param` |
+| `linear-grads x y w b` | `dW = xᵀ·err`, `db = sum(err)` | ручной `backward()` линейного слоя |
+| `linear-regression-step x y w b lr` | один full-batch шаг → `linear-model` | ручной цикл SGD |
 
-### Создание слоя: `linear`
+Проверенный вызов:
 
 ```lisp
-;; Полносвязный слой: (linear in out) → (list 'linear W B)
-;; Конвенция батча: x [N in] → y [N out]
-(defun linear (in-features out-features)
-  (list 'linear
-        (param (randn (list in-features out-features)))
-        (param (zeros (list 1 out-features)))))
+(import dl)
+(linear-forward (tensor ((1.0 2.0))) (tensor ((3.0) (4.0))) (tensor ((0.5))))
+(mse-loss (tensor ((1.0 2.0))) (tensor ((0.0 0.0))))   ;; → 2.5
+(sgd-step (tensor ((1.0 2.0))) (tensor ((0.5 0.25))) 0.1)
 ```
 
-> 🐍 Аналог `nn.Linear(in_features, out_features)`. В `Linear` PyTorch смещение — `[out_features]` (broadcast), здесь — `[1, out_features]` (явная форма `[N, out]`, broadcast-friendly). В остальном — прямой аналог.
+**Почему именно такие сигнатуры.**
 
-Доступ к весам и смещению слоя (если нужно — для отладки, для ручного обновления):
+- Нет полиморфизма по dtype и рангу: `(:tensor :f32 (_ _))` фиксирует и dtype `:f32`, и ранг 2. Литерал `tensor` тоже всегда `:f32`.
+- Bias — строка `(1 m)`, а не вектор `(m)`: broadcast `(n m) + (1 m)` даёт per-column bias, и один шаг оптимизатора годится и для матрицы весов, и для bias.
+- В рантайме нет доступа к форме тензора (нет `shape`), поэтому проверять формы внутри модуля нечем: несовпадение ловит тензорное ядро, а broadcast-совместимые, но разные формы посчитаются как broadcast. Формы — забота вызывающего.
+- Имя `mse` занято модулем `ml`, и два экспорта с одним именем из разных модулей дают `ImportConflict`; поэтому тензорная потеря называется `mse-loss`.
+- Результат шага имеет wildcard-форму `(_ _)`: `defvar`/`setq`, которые будут его получать, объявляются как `(:tensor :f32 (_ _))`; переменная с формой `(2 1)` такое значение отвергнет. Альтернатива — держать тензоры в структуре (`linear-model`, `adam-state`).
+- Все функции чистые: `(setq w (sgd-step w g lr))` заменяет биндинг, а не мутирует ячейку `param`. Плата — scratch-тензор на каждый шаг, живущий до конца top-level формы.
+
+> 🐍 **Python-аналогия.** `linear-forward` ≈ `torch.nn.functional.linear`, `mlp-forward` ≈ маленький `nn.Sequential`, `adam-init`/`adam-step`/`adam-param` ≈ пара `optimizer = Adam(params)` + `optimizer.step()` + чтение `param`. Отличие: состояние — обычная структура, а не скрытый объект оптимизатора.
+
+### Обучение без графа: замкнутый шаг
+
+У линейной регрессии градиент известен в замкнутой форме, поэтому autograd не нужен: достаточно `matmul`/`transpose`/`tsum`.
 
 ```lisp
-(layer-w (car model))       ; → W параметр первого слоя
-(layer-b (car model))       ; → B параметр первого слоя
+(import dl)
+(defvar m (:struct linear-model) (linear-regression-step
+   (tensor ((1.0) (2.0) (3.0)))
+   (tensor ((2.0) (4.0) (6.0)))
+   (tensor ((0.0)))
+   (tensor ((0.0)))
+   0.1))
+(slot-value m 'w)   ;; → тензор, близкий к ((2.0))
+(slot-value m 'b)   ;; → тензор, близкий к ((0.0))
 ```
 
-### Прямой проход: `net-forward`
-
-```lisp
-(defun net-forward (model x)
-  (if (null model)
-      x
-      (let ((layer (car model)))
-        (if (symbolp layer)
-            (net-forward (cdr model) (apply-activation layer x))
-            (net-forward (cdr model)
-                         (t+! (matmul! x (layer-w layer))
-                              (layer-b layer)))))))
-;; или просто:
-(net-forward model x)
-```
-
-> 🐍 Аналог `model(x)` для `nn.Sequential`. Разница: `net-forward` — рекурсия по cons-списку, без `for`/`while`, без Python-циклов. Это согласуется с HibLin-семантикой — каждый шаг рекурсии в новом scope.
-
-`apply-activation` — внутренний helper:
-
-```lisp
-;; (В stdlib/dl.qlsp определены макросы/функции для каждой активации)
-(relu x)         ; max(x, 0)
-(sigmoid x)      ; 1 / (1 + exp(-x))
-(tanh x)         ; стандартный tanh
-(softmax x)      ; softmax по последней оси
-```
-
-> 🐍 Аналог `F.relu(x)`, `F.sigmoid(x)`, `torch.tanh(x)`, `F.softmax(x, dim=-1)`.
-
-### Шаг обучения: `train-step`
-
-```lisp
-(train-step model x y-true optimizer lr)
-;;   model       : список-структура
-;;   x, y-true   : батч [N, in] и ground truth [N, out]
-;;   optimizer   : 'sgd или 'adam
-;;   lr          : learning rate
-;; → последний loss (mse!)
-```
-
-Реализация (из `stdlib/dl.qlsp`):
-
-```lisp
-(defun train-step (model x y-true optimizer lr)
-  (let ((loss (mse! (net-forward model x) y-true)))
-    (GRAD! loss)
-    (opt-apply model optimizer lr)
-    loss))
-```
-
-> 🐍 Аналог одного шага `loss.backward(); opt.step(); return loss` в PyTorch. Отличие: `GRAD!` объединяет `backward` + `tape.clear()`.
-
-### `opt-apply` — шаг оптимизатора
-
-```lisp
-(defun opt-apply (model optimizer lr)
-  (if (null model) nil
-    (progn
-      (let ((layer (car model)))
-        (if (equal (car layer) 'linear)
-            (if (equal optimizer 'adam)
-                (progn (ADAM-STEP (layer-w layer) lr)
-                       (ADAM-STEP (layer-b layer) lr))
-              (progn (SGD-STEP (layer-w layer) lr)
-                     (SGD-STEP (layer-b layer) lr)))))
-      (opt-apply-next (cdr model) optimizer lr))))   ;; мост, НЕ self-вызов
-```
-
-> 🐍 Аналог цикла по `model.parameters()` в PyTorch — здесь рекурсия по cons-списку.
-
-**Почему через мост, а не прямо в хвост.** Обход модели идёт через `opt-apply-next`, а не самовызовом: вызов получается не-self, поэтому шаг оптимизатора всегда читает `(car model)` — **оригинальные** стабильные ячейки модели. Перебиндинг списка при обходе (self-хвостом или через `(setq lst (cdr lst))`) рискует отдать обходу перебинденную копию списка, и шаг оптимизатора сработает не по модели. Мост убирает саму возможность такого обхода. Глубина рекурсии = число слоёв. `net-forward` устроен так же (`net-forward-tail`).
-
-### `train-epochs` — N эпох
-
-```lisp
-(defun train-epochs (model x y-true optimizer lr epochs)
-  (let ((loss nil) (i 0))
-    (while (< i epochs)
-      (setq loss (train-step model x y-true optimizer lr))
-      (setq i (+ i 1)))
-    loss))
-```
-
-> 🐍 Аналог `for epoch in range(epochs): ...` в Python. В Qualisp — `while`; рекурсия осталась для `net-forward` и `opt-apply` ради согласованности с HibLin-семантикой (внутри `while` откат итерации рвёт узлы ленты, поэтому forward не делают циклом).
+`linear-grads` считает `err = xW + b − y`, `dW = xᵀ·err`, `db = sum(err)`; `lr` относится к «суммарному» градиенту (при желании среднего по батчу делите `lr` на `n`).
 
 ## 8.2 Полный пример: XOR (DL)
 
+Источник — `examples/xor.qlsp` (проверенный прогон). Сеть 2→3→1 с `tanh`, полный батч, SGD на месте через `tset!`:
+
 ```lisp
-(import DL)
+(defvar x   (:tensor :f32 (4 2)) (tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))))
+(defvar tgt (:tensor :f32 (4 1)) (tensor ((0.0) (1.0) (1.0) (0.0))))
 
-;; XOR-датасет
-(defvar X (tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))))
-(defvar Y (tensor ((0.0) (1.0) (1.0) (0.0))))
+(defvar w1 (:tensor :f32 (2 3)) (param (tensor ((0.5 -0.4 0.3) (-0.2 0.6 -0.5)))))
+(defvar b1 (:tensor :f32 (3))   (param (tensor (0.1 -0.1 0.0))))
+(defvar w2 (:tensor :f32 (3 1)) (param (tensor ((0.7) (-0.8) (0.9)))))
+(defvar b2 (:tensor :f32 (1))   (param (tensor (0.0))))
 
-;; Модель: 2 → 4 (ReLU) → 1
-(defvar model (list (linear 2 4)
-                    'relu
-                    (linear 4 1)))
+(defgraph xor-loss (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
+                    w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1)) tgt (:tensor :f32 (4 1)))
+                   :flonum
+  (let ((h (tanh (+ (matmul x w1) b1))))
+    (let ((p (+ (matmul h w2) b2)))
+      (let ((d (- p tgt)))
+        (tmean (* d d))))))
 
-;; Обучение: 500 эпох, SGD, lr=0.5
-(train-epochs model X Y 'sgd 0.5 500)
+(defgraph xor-predict (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
+                       w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1))) (:tensor :f32 (4 1))
+  (+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2))
 
-;; Проверка
-(net-forward model X)
-;; → тензор, близкий к [[0], [1], [1], [0]]
+(defvar lr :flonum 0.5)
+(defvar epoch :fixnum 0)
+(while (< epoch 5000)
+  (grad! (xor-loss x w1 b1 w2 b2 tgt))
+  (tset! w1 0 0 (- (tref w1 0 0) (* lr (tref (grad-of w1) 0 0))))
+  ;; … остальные элементы w1, b1, w2, b2 — по той же схеме
+  (tset! b2 0 (- (tref b2 0) (* lr (tref (grad-of b2) 0))))
+  (setq epoch (+ epoch 1)))
+
+(defvar y (:tensor :f32 (4 1)) (xor-predict x w1 b1 w2 b2))
+(print (tref y 0 0))   ;; → ≈ 0
+(print (tref y 1 0))   ;; → ≈ 1
 ```
+
+> Веса — `param` и аргументы графа: всё, что трассировщик видит как константу (`tensor`-литерал в теле), градиента не получит. `let` связывает параллельно, поэтому зависимые биндинги вложены.
 
 ### Python-эквивалент (PyTorch)
 
@@ -173,11 +125,10 @@ import torch.nn as nn
 
 X = torch.tensor([[0., 0.], [0., 1.], [1., 0.], [1., 1.]])
 Y = torch.tensor([[0.], [1.], [1.], [0.]])
-
-model = nn.Sequential(nn.Linear(2, 4), nn.ReLU(), nn.Linear(4, 1))
+model = nn.Sequential(nn.Linear(2, 3), nn.Tanh(), nn.Linear(3, 1))
 opt = torch.optim.SGD(model.parameters(), lr=0.5)
 
-for epoch in range(500):
+for epoch in range(5000):
     pred = model(X)
     loss = nn.functional.mse_loss(pred, Y)
     opt.zero_grad()
@@ -191,113 +142,103 @@ print(model(X))  # → [[~0], [~1], [~1], [~0]]
 
 | Qualisp | PyTorch | Пояснение |
 |---|---|---|
-| `(defvar model (list ...))` | `nn.Sequential(...)` | модель — данные, а не объект |
-| `(net-forward model x)` | `model(x)` | прямой проход по cons-списку (рекурсия) |
-| `(train-step model x y 'sgd lr)` | `loss.backward(); opt.step()` | одна функция = forward + loss + backward + step |
-| `(train-epochs model x y 'sgd lr 500)` | `for epoch in range(500): ...` | N эпох, `while` |
-| `'sgd`, `'adam` (символы) | `optim.SGD`, `optim.Adam` (объекты) | оптимизатор — выбираемый символ |
+| `(defgraph xor-loss …)` | `forward` + `loss` модели | граф задаётся явно, компилируется лениво |
+| `(defvar w1 … (param …))` | `nn.Parameter` | параметры — stable-тензоры с `requires_grad` |
+| `(grad! (xor-loss …))` | `loss.backward()` | backward по последнему запуску графа |
+| `(tset! w1 0 0 …)` | `opt.step()` | обновление элементов вручную, без in-place оптимизатора |
+| `(xor-predict …)` | `model(X)` | отдельный граф для инференса |
 
-## 8.3 Свёрточные примитивы
+## 8.3 Классические метрики: модуль `ml`
 
-Вне модуля `dl` (в ядре) есть autograd-операции для свёрточных сетей:
+Модуль `ml` (`src/stdlib/ml.qlsp`) не строит моделей — он считает метрики и готовит данные. Метрики определены на непустых `(:list :flonum)`; `:fixnum`-входы расширяются до `:flonum`, результат всегда `:flonum`.
 
-| Примитив | Что делает | Python-аналог |
+| Функция | Что делает | Python-аналог |
 |---|---|---|
-| `(conv2d! x k s p)` | 2D-свёртка | `F.conv2d(x, k, stride=s, padding=p)` |
-| `(maxpool2d! x k s)` | 2D max-pooling | `F.max_pool2d(x, kernel_size=k, stride=s)` |
-| `(batchnorm! h)` | batch normalization | `nn.BatchNorm1d`/`BatchNorm2d` |
-| `(layernorm! h)` | layer normalization | `nn.LayerNorm` |
-| `(dropout! h 0.5)` | dropout (p=0.5) | `nn.Dropout(0.5)` |
-| `(weighted-lookup probs v1 v2)` | взвешенная сумма (скаляр) | ручное `probs[0]*v1 + probs[1]*v2` |
-| `(argmax t)` / `(softmax! t)` | argmax / softmax | `t.argmax()` / `F.softmax(t, dim=-1)` |
+| `mean xs` | среднее | `np.mean` |
+| `mse pred actual` | средний квадрат по спискам | `sklearn.metrics.mean_squared_error` |
+| `mae pred actual` | средняя абсолютная ошибка | `mean_absolute_error` |
+| `rmse pred actual` | корень из MSE | `sqrt(mean_squared_error)` |
+| `accuracy pred actual` | доля совпадений, метки любого атомарного типа | `accuracy_score` |
+| `precision` / `recall` / `f1` | бинарные метки 1/0, нулевой знаменатель → `0.0` | `precision_score` / `recall_score` / `f1_score` |
+| `train-part xs ratio` / `test-part xs ratio` | разбиение, пустая часть → `nil` | `train_test_split` |
+| `minmax-scale xs` | `[0,1]`, вырожденный диапазон → нули | `MinMaxScaler` |
+| `standardize xs` | генеральное СКО (делим на n) | `StandardScaler` |
+| `t-mse pred actual` | MSE для 1-D `(:tensor :f32 (_))` | `F.mse_loss` на векторе |
 
-Все эти примитивы **записывают на ленту** (суффикс `!`) и участвуют в `(grad! loss)`.
+```lisp
+(import ml)
+(mean (list 1.0 2.0 3.0))                 ;; → 2.0
+(mse (list 1.0 2.0) (list 0.0 0.0))       ;; → 2.5
+(t-mse (tensor (1.0 2.0)) (tensor (0.0 0.0)))  ;; → 2.5
+(train-part (list 1.0 2.0 3.0 4.0) 0.5)   ;; → (1.0 2.0)
+(accuracy (list 1 0 1) (list 1 0 0))      ;; → 0.6666666666666666
+```
 
-Арность и типы аргументов проверяются: неверное число аргументов или нечисловой `eps` — внятная ошибка, а не чтение мусора.
+`train-part`/`test-part` возвращают `(:option (:list T))` (пустая часть — `nil`), ratio вне `0..1` — `throw`, округление `ratio·n` с допуском `1e-9`.
 
-> 🐍 Эти операции не имеют «удобного» Python-аналога, объединяющего в один prim — в PyTorch каждая идёт через `torch.nn.functional` или `torch.Tensor`. В Qualisp всё встроено.
+Свёрточных, пулинговых и нормализационных примитивов (`conv2d`, `maxpool2d`, `batchnorm`, `layernorm`, `dropout`) в текущей реализации нет; нет и 2-D `softmax`. Для построения выражений над тензорами из символьных термов служит модуль `neuro` (гл. 14) — он описан там же, вместе с примером свёрки `diff` и autograd.
 
-## 8.4 Контракт tape для DL
+## 8.4 Контракт autograd для DL
 
-- Параметры создаются через `PARAM` (requires_grad=true), узел ленты живёт на самом тензоре и **переживает HibLin-promote** в stable-скоп.
-- Adam-состояние (`m`/`v`/`step`) аллоцируется в stable-скоп **на самом параметре** — состояние оптимизатора не умирает с итерацией: шаг оптимизатора читает оригинальные стабильные ячейки модели (см. `opt-apply` выше), а header стабильного тензора освобождается вместе с буфером, а не остаётся в `stable-bytes` навсегда.
-- Алиасинг при присваивании: `(setq a b)` для стабильных тензоров **делит** запись, а не копирует — оба имени указывают на один тензор, `m`/`v`/`grad` общие (гл. 6 и 7).
-- Все `!`-операции внутри `net-forward` и `train-step` пишут на tape, а операторы `+ - * /` пишут при `requires_grad`. После `GRAD!`/`GRAD-ACCUM!` tape пуст; `SGD-STEP`/`ADAM-STEP` засчитывают градиент прочитанным (гл. 7).
-- **Форма ленты видна целиком.** `(TAPE-FORM)` отдаёт записи `(OP результат (входы...) payload)`; композиции `dl` не сворачиваются в один узел — у `attention` в одной форме их восемь (`TRANSPOSE!`, `MATMUL!`, `T*!`, `T-!`, `EXP!`, `SUM!`, `T/!`, `MATMUL!`), и градиенты q/k/v ненулевые. `t-gather!`/`t-rows!`/`t-slice!` — `deftape!`-функции, их узлы видны с backward-функцией в payload.
-- Свою дифференцируемую функцию можно описать прямо в программе — `deftape!`: прямая часть на `!`-операциях, обратная — лямбда со списком градиентов, аргументы которой — borrowed-виды аргументов (не копии); не-тензорные аргументы (`ids`, `from`, `len`) сохраняются в узле как есть (гл. 7.8).
-- Градиент не переживает границу формы: `GRAD!`, чтение градиента и шаг оптимизатора должны происходить в одной форме. `train-step` делает всё три в одной форме, поэтому обучение через `train-epochs` работает.
-- Для таблиц эмбеддингов вместо плотного шага есть `ADAM-SPARSE-STEP param ids lr`: состояние `m`/`v` общее с `ADAM-STEP`, обновляются только строки `ids`, стоимость `O(|ids|·d)`.
-- `(train-step ...)` возвращает loss — можно накапливать в список для логов.
+- Параметры создаются через `param` (гл. 7) и передаются в `defgraph` аргументами; константы тела графа градиента не получают.
+- `(grad-of w)` — stable-градиент параметра (или нули той же формы). Обновление — `tset!` по `(grad-of w)` в той же top-level форме, где вызван `grad!`.
+- Функции `dl` чистые: они не мутируют переданные тензоры и не «потребляют» градиент. Состояние Adam/momentum — отдельная структура (`adam-state`, `momentum-state`), а не поля тензора; `adam-step`/`momentum-step` возвращают **новое** состояние.
+- Графа как значения языка нет: `defgraph` — мастер-форма, скомпилированный граф — производный артефакт. `(grad! …)` работает с последним запуском в текущей форме.
+- Нет in-place оптимизатора, разреженных шагов по строкам и снимков состояния: для чекпоинта используйте `save-weights`/`load-weights` (гл. 6).
+- Шаг обучения — пользовательская функция, которая в одной форме делает `grad!`, чтение `grad-of` и `tset!`; результат шага можно вернуть как loss.
+
+> 🐍 `optimizer.step()` в PyTorch заменяется явным проходом по элементам с `tset!`; `state_dict()` — структурой `adam-state`, которую можно передавать как обычное значение.
 
 ## 8.5 HLO-инференс модели (гл. 10)
 
-После обучения можно скомпилировать прямой проход в нативный код:
+Граф задаётся `defgraph`, а его вызов и есть forward. Для тех же весов обычно определяется `xor-predict`-граф, отличный от графа потерь:
 
 ```lisp
-(defvar hlo
-  (HLO-START (:psi 1)
-    (let ((dx (graph-param X)))
-      (HLO-COMPILE
-        (t+ (matmul (relu (t+ (matmul dx (layer-w (car model)))
-                              (layer-b (car model))))
-                    (layer-w (car (cdr (cdr model)))))
-            (layer-b (car (cdr (cdr model)))))))))
+(defgraph predict (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
+                     w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1))) (:tensor :f32 (4 1))
+  (+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2))
 
-(defvar result (hlo-run hlo X))   ; нативный инференс
+(defvar y (:tensor :f32 (4 1)) (predict x w1 b1 w2 b2))   ;; нативный инференс
 ```
 
-`HLO-START` открывает сессию трассировки на своё тело, а конфиг (`:psi`, `:buffer_size`, `:verify-gate`) действует только внутри тела. Вне `HLO-START` для `HLO-COMPILE` нужен `(START-TRACE)` в той же форме.
-
-> 🐍 Аналог `torch.compile(model)` — но требует пересборки графа вручную (нет автоматической трассировки `model.forward`). Это явный trade-off.
-
-Два контракта трассировки, которые важны на практике:
-
-- **Константы графа владеют своими байтами (record-time seal).** Константа, записанная трейсом, клонируется в хранилище, живущее ровно столько же, сколько идёт сессия трассировки (`trace_store_`), и обнуляется на новом `START-TRACE`. `seal_graph_constants` копирует константы из хранилища, которое заведомо переживает граф, — поэтому кросс-форменная компиляция (трассировка в одной форме, `HLO-COMPILE` в следующей) безопасна.
-- **Под трассировкой рекурсия не хвостовая.** Граф накапливается **сквозь** итерации self-хвостового вызова, а откат scratch на итерации освобождал прокси и тензоры-операнды, на которые граф ещё ссылается. Поэтому трассируемая рекурсия всегда идёт обычным вызовом, удерживая все кадры (и их узлы графа).
-
-Композиция `softmax!` под трассой сворачивается в узел `SOFTMAX` (peephole по последней оси), а `attention` — в fused `ATTENTION` с нативным стенсилом: на `T=64, D=64` это ~12.9 µs против ~85 µs у eager-композиции. `(hlo-stencil-p prog)` отвечает, есть ли нативное ядро.
-
-Подробности — в гл. 10 (HLO-компиляция).
-
-## 8.6 Инференс без ленты и REINFORCE
-
-### `net-apply`, `net-infer`, `net-infer-apply` — слой и tape-free инференс
-
-Обучающие `!`-операции внутри `net-forward` пишут на ленту, а в циклах tape-опы без `GRAD!` рвут граф. Модуль `dl` разделяет шаг слоя и проход по модели на две пары:
+Первый вызов графа компилирует его в x86-64 (fused-ядра — call-threaded, W^X-страница), последующие идут без ожидания; фоновая компиляция — `N = min(cpu_count, 8)` воркеров. Для одного elementwise-выражения вместо графа можно определить `defuse`:
 
 ```lisp
-(net-apply layer x)          ;; шаг слоя с записью на ленту: linear/relu/sigmoid/tanh/softmax
-(net-forward model x)         ;; проход по модели (использует net-apply)
-
-(net-infer-apply layer x)     ;; шаг слоя без ленты
-(net-infer model x)           ;; проход по модели без записи на ленту
+(defuse affine (x (:tensor :f32 (4)) a :flonum b :flonum) (:tensor :f32 (4))
+  (relu (+ (* x a) b)))
 ```
 
-Tape-free вариант понимает `linear`, `relu`, `'softmax` и `(layernorm gamma beta)`; для остальных kinds он бросает внятную ошибку. Инференс не требует `GRAD!`-пустышки: `net-infer` просто не создаёт узлов.
+Eager-вызов `defuse` компилирует скалярный f32-цикл с AVX2 по 8 чисел + scalar-tail, без промежуточных тензоров. Внутри `defgraph` вызов `defuse` инлайнится в `let` перед трассировкой, поэтому такой forward/backward идёт обычными HLO-узлами.
 
-Рядом живут точечные tape-free операции: `T-DETACH` (копия без `requires_grad`), `SOFTMAX`, `LAYERNORM`, `T-EXP`, `T-SQRT`, `T-LOG`. `TAPE-FORM` после них на `PARAM` остаётся пустым.
+**Контракты трассировки, которые важны на практике:**
 
-> 🐍 Аналог `with torch.no_grad(): model(x)` — но без контекста: это просто другие функции, и в горячем `while` они не создают нод ленты вовсе.
+- Константы тела графа (`tensor`, `zeros`/`ones`/`randn`) трассируются один раз и становятся stable-тензорами графа: они переживают границу формы и не требуют `grad!`.
+- Управление статическое: ветвления по значениям тензоров, `tref`/`tset!` внутри графа не поддерживаются.
+- Под трассировкой нет рекурсии и вложенных `defgraph`; data-dependent control flow отсутствует.
 
-### REINFORCE: `SAMPLE` и `reinforce-loss!`
+> 🐍 Аналог `torch.compile(model)` — но граф собирается вручную через `defgraph`/`defuse`, без автоматической трассировки `model.forward`.
 
-В ядре есть примитив **`SAMPLE`** (категориальный softmax-сэмплинг one-hot действий, детерминированный сид как у `RANDN`; невыбранные слоты заполняются нулями явно). В `stdlib/dl.qlsp` на нём построено REINFORCE-ядро:
+## 8.6 Инференс без градиента
+
+Поскольку записи на ленту нет, инференс — это просто вызов eager-функции `dl` или `defgraph` без `grad!`: узлы backward не строятся сами по себе, даже если тензор помечен `param`.
 
 ```lisp
-(defvar action (sample logits))               ;; one-hot [batch, N]
-(reinforce-loss! logits action-index reward)  ;; reward × CROSS-ENTROPY!(logits, index)
+(import dl)
+(defvar logits (:tensor :f32 (_ _)) (mlp-forward x w1 b1 w2 b2))  ;; обычный вызов
+(defvar yhat (:tensor :f32 (4 1)) (predict x w1 b1 w2 b2))         ;; вызов графа
 ```
 
-- `reinforce-loss!` = reward × `CROSS-ENTROPY!(logits, action-index)` с градиентом `reward·(p − onehot)`; таргеты — целочисленные индексы `[batch]`, upstream-градиент (множитель reward) протаскивается в backward.
-- Полный REINFORCE с baseline — в stdlib (`tests/nsrl_t1.qlsp`: ручные значения CE, знаки градиентов при ±reward, детерминированный 2-рукий бандит сходится).
-- RL-надстройка (макро-слоты, `EVAL-SANDBOXED`, роутинг) — в гл. 12 и 14.
+Специальной формы `no_grad` не нужно: `param` лишь разрешает `grad!` заполнить `grad-of`, а не меняет поведение самих операций. Термы `neuro` добавляют к этому символьную проверку градиента (гл. 14).
+
+> 🐍 Это `with torch.no_grad(): model(x)` — но без контекстного менеджера: те же функции работают и на обучении, и на инференсе, разница лишь в том, вызывается ли `grad!`.
 
 ## 8.7 Известные ограничения DL
 
-- **Нет автоматической трассировки `model.forward`.** Чтобы скомпилировать в HLO, нужно вручную собрать граф из параметров — `(graph-param w)`, `(graph-param b)`, и т.д. Удобство в том, что это явное.
-- **Нет `nn.Module`-подобной интроспекции.** Чтобы получить список параметров модели, нужно рекурсивно обойти cons-список — `opt-apply` делает это внутри.
-- **Нет `Sequential` с произвольным порядком.** Только `linear` → activation → `linear` → … (без `BatchNorm`/`Dropout` как слоёв). Свёрточные примитивы (`conv2d!`, `maxpool2d!`) — autograd-примитивы, а не слои; их можно вставить в HLO-граф, но не в `net-forward` напрямую.
-- **Окна read-only.** `T-ROWS`/`T-SLICE` над trainable-параметром не дают обучать его строки: обучать строки таблицы нужно через `EMB-LOOKUP`/`T-GATHER!` + `ADAM-SPARSE-STEP`.
-- **Tied embeddings + `ADAM-SPARSE-STEP`** теряют плотный градиент — это осознанный компромисс.
-- **Fused `ATTENTION`** сворачивается только для softmax по последней оси; другая ось идёт generic-узлами и интерпретаторным фоллбэком.
-- **`opt-apply` рекурсивный** — для очень глубоких серий может быть стек-переполнение. На практике не проблема (модели редко >100 слоёв).
+- Модуль работает только с `:f32` и только с 2-D тензорами «batch × features»; полиморфизма по dtype и рангу нет.
+- Нет слоёв-как-данных, `nn.Module`, `Sequential` с произвольным порядком и автоматической трассировки `model.forward`: графы собираются вручную.
+- Нет свёрточных/пулинговых примитивов, нормализаций, dropout и 2-D softmax; символьные термы — в `neuro` (гл. 14).
+- Нет in-place шага оптимизатора: веса обновляются `tset!` по `(grad-of w)`; шаги `dl` чистые и требуют wildcard-формы `(_ _)` у принимающих переменных.
+- Нет разреженных шагов по строкам и снимков состояния оптимизатора: для сохранения весов — `save-weights`/`load-weights`.
+- Нет прямого доступа к форме тензора из рантайма: несовпадение ловит ядро или broadcast, а не проверка в stdlib.
+- Имена структур `dl` специфичны (теги не мангляются по модулю).
+- `ml` считает метрики по спискам и одну метрику по 1-D тензору; 2-D вход в `t-mse` не типизируется.

@@ -1,21 +1,21 @@
 # 📖 Qualisp Book
 
-**Ориентировочная книга по языку программирования Qualisp** (ранее QLISP) — Лиспу для машинного обучения и AI.
+**Книга по языку программирования Qualisp** — статически типизированному Лиспу для машинного обучения и AI.
 
-Qualisp — диалект Лиспа, интерпретатор и JIT-компилятор которого работают прямо на S-выражениях (copy-and-patch в нативные страницы без промежуточного IR), со встроенной тензорной системой (F16/F32/F64/I32/I64/U8), автоградиентом, стенсил-компиляцией HLO-кёрнелов и нейросимвольным слоем (rule engine, унификация, `NS-IF`/`NS-GRAD!` с guilt detector) — всё в стандартной библиотеке, без единого `pip install`.
+Qualisp — диалект Лиспа с полной статической типизацией, JIT-компиляцией прямо по S-выражениям (copy-and-patch в нативные страницы, без промежуточного IR и без AOT), встроенными тензорами, HLO-графами с автоматическим дифференцированием и нейросимвольной логикой `ns-if`. Реализация — на Zig, один бинарник, без внешних зависимостей для запуска.
 
 Свойства, которые отличают Qualisp от обычного ML-стека:
 
-- **Память без GC и без арен.** Модель HibLin: дерево scope'ов (каждый вызов — регион с откатом одной записью), значения живут в scope'е своего хранилища, побег региона — явное событие; scratch умирает откатом, stable — под подсчётом ссылок. Ни пауз GC, ни перерасхода памяти.
-- **Инвариант одной формы.** S-выражение — единственное представление программы. Нативный код (JIT-замыкания и HLO-кёрнелы) — выбрасываемый кэш, выведенный из S-выражений; у HLO мастер-копия программы — форма графа, а понижение — одноразовый кэш. AOT запрещён.
-- **Гомоиконность в рантайме.** `EVAL`, `READ-FROM-STRING`, `WRITE-TO-STRING`, `FUNCTION-BODY`, `SYMBOL-NAME` — код доступен как данные.
-- **ML — часть языка.** Тензоры (с записью элемента на месте и read-only окнами), лента градиентов как форма, оптимизаторы с чекпоинтом, классические алгоритмы ML, коллекции, аудио, строковые утилиты, табличный модуль Tablet, нейросимвольный движок, асинхронный слой — 16 вшитых модулей, один бинарник ~2 МБ.
-- **Структуры, методы и трейты.** Фиксированный layout, методы с диспетчем по первому аргументу, типизированные поля (`i64`/`f64`/`byte`/`ptr` живут raw), трейты с дефолтными телами; ошибки — структуры с полным бектрейсом.
-- **Встраивание в обе стороны.** FFI C (`FFI-DEFUN`/`FFI-DEFSTRUCT` с C-layout) — Lisp зовёт C; embedding C API (`qualisp-core`) — C зовёт Lisp, включая регистрацию C-функций как примитивов.
-- **Многослойный ML-путь.** Интерпретатор с авто-JIT (серые функции компилируются сами), SIMD-ядра (AVX2/NEON), OpenBLAS для матриц, HLO-стенсилы на W^X-страницах — без LLVM в рантайме.
-- **Дифференцируемые окна и выборки.** `T-GATHER-ROWS`/`T-SCATTER-ADD`, `t-gather!`/`t-rows!`/`t-slice!`, `attention`, `EMB-LOOKUP` + `ADAM-SPARSE-STEP`, `TRANSPOSE!`/`RESHAPE!`/`SUM!`/`MEAN!`.
-- **Диагностика вместо тишины.** Неверная арность, выход за границы, нечисловые веса, потерянный градиент — всё это даёт названную ошибку или предупреждение, а не мусор в результате; `(JIT-STATS)` называет причины отказов компиляции.
-- **Инструменты разработчика.** `qualisp-prof` (журнал JSONL, живой режим `attach`), `qualisp-dbg` (break/step/bt/locals/p по TCP), полноценный LSP-сервер (`qualisp-lsp`): семантические токены, scope-aware rename/references, signature help, inlay hints, call hierarchy.
+- **Одно представление программы.** Единственная мастер-копия — S-выражение. JIT-страница и скомпилированный HLO-граф — выбрасываемые кэши, выведенные из формы. AOT-компилятора нет.
+- **Полная статика.** `:any` запрещён: типы параметров и возврата обязательны, типы тензоров несут dtype и форму. Ошибка типа — отказ компиляции с позицией `file:line:col`, а не мусор в рантайме.
+- **Calling convention вызова.** `entry(frame, env, rt, out)`: кал сам пишет результат в `*out`. Это.base полного TCO — хвостовой самовызов становится прыжком, хвостовой вызов другой функции использует повтор кадра; взаимная рекурсия работает на 1M вызовов.
+- **Память без GC и без RC.** Bump-арена кадров, скоупы, отдельные миры `scratch`/`world` и пул тензорных буферов. Writable views нет: `reshape`/`transpose`/`t-rows` копируют.
+- **Тензоры и графы.** DTypes F16/F32/F64/U8, elementwise `+ - * /`, `matmul`, редукции, `defgraph`/`defuse`, forward/backward с O(n)-обратным проходом, fused-ядра, AVX2-пути.
+- **Нейросимвольная логика.** `ns-if` с ROBDD-покрытием и дифференцируемыми ветвями, примитивы `ns-grt`/`ns-geq`/`ns-lss`/`ns-leq`/`ns-and`/`ns-or`/`ns-not`/`ns-eq`/`ns-neq`; мост `neuro` превращает символьный терм в тензорный код.
+- **Стандартная библиотека из 11 модулей:** `core`, `string`, `collections`, `test`, `io`, `ml`, `dl`, `symbolic`, `argparse`, `tablet`, `neuro`.
+- **Кроссплатформенность.** Linux x86-64 (SysV, AVX2) и Windows x86-64 (`gnu`/`msvc`), W^X через `mmap`/`mprotect` или `VirtualAlloc`/`VirtualProtect`, резерв стека 256 МБ.
+- **Инструменты.** `qualisp --trace out.json script.qlsp` пишет Chrome Trace JSON; `qprof` агрегирует self/inclusive время. QSRD v1/Q2 с crc32 и отдельной секцией `model` (`save-weights`/`load-weights`).
+- **Проверено.** `zig build test`: 834 теста на Linux и 834 на Windows.
 
 Книга написана для **инженеров с Python-бэкграундом**: каждая глава содержит аналогии с Python, NumPy, PyTorch и scikit-learn.
 
@@ -23,38 +23,38 @@ Qualisp — диалект Лиспа, интерпретатор и JIT-ком�
 
 | Глава | Тема | Python-аналог |
 |-------|------|---------------|
-| [01. Введение](book/01-introduction.md) | Зачем нужен Qualisp, философия, пайплайн | «Почему не Python?» |
-| [02. Начало работы](book/02-getting-started.md) | Установка, REPL, первая программа, JIT | `python`, `pip` |
-| [03. Основы языка](book/03-language-basics.md) | S-выражения, функции, гомоиконность (`EVAL`, `FUNCTION-BODY`) | синтаксис, `def`, `lambda`, `ast` |
-| [04. Система типов](book/04-type-system.md) | Постепенная типизация, линейные типы тензоров | type hints, mypy |
-| [05. Модель памяти](book/05-memory-model.md) | HibLin: дерево scope'ов, правило корня, передача владения, `(mem-report)` | GC, `numpy` views |
-| [06. Тензоры](book/06-tensors.md) | N-мерные массивы, dtype, broadcasting, `TSET!`, matmul | NumPy / torch |
-| [07. Автоградиент](book/07-autograd.md) | Лента градиентов, `!`-операции, SGD/Adam, контракт tape | `torch.autograd` |
-| [08. Глубокое обучение](book/08-deep-learning.md) | Модуль DL: слои-как-данные, `net-forward`/`train-step`/`train-epochs` | `torch.nn` |
-| [09. Классический ML](book/09-classic-ml.md) | KNN, деревья, ансамбли, метрики, CV, grid search | scikit-learn |
-| [10. HLO-компиляция](book/10-hlo-compilation.md) | Форма графа как мастер-программа, проходы, стенсиль-эмиттер, W^X | `torch.compile`, XLA |
-| [11. Устройства](book/11-gpu.md) | Абстракция `Device`: сейчас только CPU | `.to('cuda')` |
-| [12. Макросы](book/12-macros.md) | Код-как-данные, backquote, compiler macros, `EVAL`/`READ-FROM-STRING` | декораторы, метаклассы |
-| [13. Структуры и методы](book/13-oop.md) | defstruct, IMPL, трейты, typed-поля | `@dataclass`, `Protocol` |
-| [14. Символьное программирование](book/14-symbolic-programming.md) | match, unify, rule engine, amb, `NS-IF`/`NS-GRAD!`, смешанный батч, `:proves`, движок blackit | `match-case`, Prolog |
-| [15. Стандартная библиотека](book/15-standard-library.md) | 16 модулей: IO, Regex, Collections, Argparser, Errors, Tablet, Async и др. | `re`, `argparse`, `collections` |
-| [16. Пакеты и FFI](book/16-packages-and-ffi.md) | qvalent, FFI C (DEFUN/DEFSTRUCT), embedding C API, QSRD | `pip`, `ctypes` |
-| [17. Разбор примеров](book/17-full-examples.md) | Линейная регрессия и XOR-MLP с Python-эквивалентами | end-to-end туториалы |
+| [01. Введение](book/01-introduction.md) | Что такое Qualisp, философия, пайплайн | «Почему не Python?» |
+| [02. Начало работы](book/02-getting-started.md) | Установка, REPL, первый файл, `qprof` | `python`, `pip` |
+| [03. Основы языка](book/03-language-basics.md) | S-выражения, типы, `defun`, `let`, макросы, `eval` | синтаксис, `def`, `lambda`, `ast` |
+| [04. Система типов](book/04-type-system.md) | Статическая типизация, `:fixnum`, `:tensor`, overload | type hints, mypy |
+| [05. Модель памяти](book/05-memory-model.md) | Скоупы, bump-арена кадров, scratch/world | ручное управление памятью |
+| [06. Тензоры](book/06-tensors.md) | DType, форма, `tref`/`tset!`, `matmul`, broadcast | NumPy / torch |
+| [07. Автоградиент](book/07-autograd.md) | `param`, `grad!`, `grad-of`, `defgraph`, O(n)-backward | `torch.autograd` |
+| [08. Глубокое обучение](book/08-deep-learning.md) | Модуль `dl`: слои, обучение, инференс | `torch.nn` |
+| [09. Классический ML](book/09-classic-ml.md) | KNN, деревья, ансамбли, метрики, CV | scikit-learn |
+| [10. HLO-компиляция](book/10-hlo-compilation.md) | `defgraph`/`defuse`, граф, fused-ядра, пул | `torch.compile`, XLA |
+| [11. Устройства](book/11-gpu.md) | Вычисления и платформы: CPU x86-64, AVX2, W^X | `.to('cuda')` (нет) |
+| [12. Макросы](book/12-macros.md) | `:syntax`, `&rest`/`&optional`, `macroexpand-all`, `eval` | декораторы, метаклассы |
+| [13. Структуры и методы](book/13-oop.md) | `defstruct`, трейты, `impl`, диспетч | `@dataclass`, `Protocol` |
+| [14. Символьное программирование](book/14-symbolic-programming.md) | `ns-if`, ROBDD, два спуска, `symbolic`, `neuro` | `match-case`, Prolog |
+| [15. Стандартная библиотека](book/15-standard-library.md) | 11 модулей и их изоляция | `re`, `argparse`, `collections` |
+| [16. Пакеты и FFI](book/16-packages-and-ffi.md) | FFI POSIX/Win64, QSRD v1/Q2, веса | `ctypes`, `pickle` |
+| [17. Разбор примеров](book/17-full-examples.md) | XOR, `term`, аргументы CLI | end-to-end туториалы |
 | [18. Шпаргалка](book/18-python-cheatsheet.md) | Qualisp ↔ Python/NumPy/PyTorch/sklearn | справочник |
-| [19. Устройство компилятора](book/19-internals-overview.md) | Reader, интерпретатор, HibLin, HLO, JIT, LSP, гейты | CPython internals |
-| [20. JIT-компиляция](book/20-jit.md) | Copy-and-patch: авто-JIT, `(JIT-STATS)`, решётка типов, специализация | CPython 3.13 JIT |
-| [21. Образы](book/21-images.md) | `SAVE-IMAGE`/`LOAD-IMAGE`: мир как данные, формат QLSI | `pickle` + `torch.save` |
-| [22. Tablet](book/22-tablet.md) | Детерминированный DataFrame-аналог pandas: groupby/merge/окна, CSV/JSON, NA-дисциплина | `pandas` |
+| [19. Устройство компилятора](book/19-internals-overview.md) | Reader → checker → JIT → run, 834 теста | CPython internals |
+| [20. JIT-компиляция](book/20-jit.md) | Calling convention, TCO, source maps, W^X | CPython 3.13 JIT |
+| [21. Образы](book/21-images.md) | QSRD v1/Q2, `save-image`, веса модели | `pickle` + `torch.save` |
+| [22. Tablet](book/22-tablet.md) | Числовая таблица: `make-tablet`, `where`, `sort-by` | `pandas` |
 
 ## Быстрый старт
 
 ```bash
-# Скачать бинарник (Linux x86_64, релиз v2.9.14)
-curl -L https://github.com/FQingLars/Qualisp-Project/releases/download/v2.9.14/qualisp-linux-x86_64 -o qualisp
+# Скачать бинарник (Linux x86_64, релиз v0.19.15)
+curl -L https://github.com/FQingLars/Qualisp-Project/releases/download/v0.19.15/qualisp-0.19.15-linux-x86_64 -o qualisp
 chmod +x qualisp && mv qualisp ~/.local/bin/
 
-# Windows: qualisp-windows-x86_64.zip со страницы релизов (qualisp.exe, qualisp-lsp.exe, qvalent.exe)
-# Рядом в релизе: qualisp-lsp-linux-x86_64, qvalent-linux-x86_64, SHA256SUMS
+# Windows: qualisp-0.19.15-windows-x86_64.exe со страницы релизов
+# Рядом: qprof-0.19.15-{linux-x86_64,windows-x86_64.exe,windows-x86_64.pdb}, SHA256SUMS.txt
 
 # REPL
 qualisp
@@ -62,55 +62,52 @@ qualisp
 
 ```text
 Qualisp
-Enter expressions, press Ctrl+D to exit.
+> (+ 1 2)
+3
+> (defun sq (x :fixnum) :fixnum (* x x))
+SQ
+> (sq 7)
+49
+```
 
-> (+ 1 2 3 4 5)
-=> 15
-> (defun square (x: Float) -> Float (* x x))
-=> SQUARE
-> (square 4.0)
-=> 16.0
-> (import ML)
-=> nil
+Запуск файла и профилирование:
+
+```bash
+qualisp script.qlsp
+qualisp --trace out.json script.qlsp
+qprof out.json
 ```
 
 ## Для кого эта книга
 
-- **ML-инженеры на Python**, которым нужен компилируемый язык без GIL, без GC-пауз и с нативной производительностью.
-- **Лисперы**, которым нужен современный инструментарий ML: тензоры, автоград, HLO-компиляция, нейросимвольный движок.
-- **Исследователи нейросимвольного AI**: Qualisp сочетает гомоиконный символьный движок (правила, унификация, паттерн-матчинг, `NS-IF`/`NS-GRAD!` с guilt detector) с нейросетевым бэктендом (автоград, HLO, SIMD).
+- **ML-инженеры на Python**, которым нужен компилируемый язык со статической типизацией, без GIL и с нативной производительностью.
+- **Лисперы**, которым нужен современный типизированный инструментарий: тензоры, autograd, HLO, нейросимвольная логика.
+- **Исследователи нейросимвольного AI**: `ns-if` с ROBDD-покрытием, дифференцируемые символьные ветви и мост `neuro` из терма в тензорный код.
 
 ## Что описывает книга
 
-Книга синхронизирована с **Qualisp 2.9.14** и описывает язык в его нынешнем виде — без истории изменений: устройство и контракты, а не список релизов.
+Книга синхронизирована с **Qualisp 0.19.15** и описывает язык в его текущем состоянии — без истории изменений: устройство и контракты, а не список релизов.
 
-- **Модель памяти и владение** — дерево scope'ов (каждый вызов — регион с откатом одной записью), правило корня и передача владения, exact-size пул для тензоров, `(mem-report)` с фиксированным набором ключей, проверочные гейты — гл. 5.
-- **Язык** — S-выражения, функции (единый callable-атом `FUNC`), `\` как синоним `lambda`, гибридные `and`/`or` и `xor`, операторы над тензорами, строковые окна, вариационная компиляция (`cfg`/`target`), макросы, гомоиконность — гл. 3, 4, 12.
-- **Структуры, методы и трейты** — `defstruct` с типизированными полями, `IMPL` с диспетчем по первому аргументу, трейты с дефолтными телами, ошибки-структуры с полным бектрейдом — гл. 13, 15.
-- **ML-подсистемы** — тензоры (read-only окна, gather/scatter), лента градиентов как форма (`TAPE-FORM`), накопление (`GRAD-ACCUM!`) и клип (`CLIP-GRAD!`), чекпоинт Adam, `deftape!`, `attention`, модуль DL, классический ML, Tablet — гл. 6–9, 22.
-- **Компиляция** — `HLO-START`, мастер-программа `(PROGRAM …)` и `GRAPH->PROGRAM`, проходы на форме, FUSION-дерево, fused `ATTENTION`, стенсильный эмиттер copy-and-patch, авто-JIT с нативными петлями и регионами, образы мира — гл. 10, 20, 21.
-- **Многоядерность** — ядра в тензорных операциях (OpenMP, OpenBLAS) и асинхронный слой (`future`/`await`/`pmap`, каналы) — гл. 15, 19.
-- **Символьный слой** — rule engine, унификация, бэктрекинг, NS-маршрутизация (смешанный батч построчно, верификация `:proves`, psi-коэффициент) и движок blackit — гл. 14.
-- **Встраивание** — FFI C (`FFI-DEFUN`/`FFI-DEFSTRUCT` с C-layout) и embedding C API (`qualisp-core`: C зовёт Lisp, регистрирует C-примитивы) — гл. 16.
-- **Инструменты** — стандартная библиотека (модули с рекурсивными зависимостями), коллекции и argparser, пакетный менеджер, LSP, профилировщик `qualisp-prof`, отладчик `qualisp-dbg`, гейты качества — гл. 11, 15, 16, 19.
+- **Язык и типы** — S-выражения, reader, статическая типизация, `defun`/`lambda`, `&optional`/`&rest`, структуры/трейты, `:syntax` и макросы, `eval`, calling convention — гл. 3, 4, 12, 13, 19.
+- **Память** — скоупы, bump-арена кадров, миры `scratch`/`world`, пул тензорных буферов, отсутствие GC/RC и writable views — гл. 5.
+- **ML-подсистемы** — тензоры, `matmul`, `defgraph`/`defuse`, `grad!`/`grad-of`, `dl`, `ml`, `neuro`, `tablet` — гл. 6–10, 14, 22.
+- **Нейросимвольная логика** — NS-примитивы, `ns-if`, ROBDD-покрытие, два спуска, диагностика — гл. 14.
+- **Инструменты и данные** — 11 модулей stdlib, FFI POSIX/Win64, QSRD v1/Q2, `save-weights`/`load-weights`, `--trace` и `qprof` — гл. 2, 15, 16, 19, 21.
+- **Производительность** — JIT по S-выражениям, полный TCO, SIMD AVX2, fused-ядра, Windows-поддержка — гл. 11, 20.
 
 Известные ограничения (подробности — в соответствующих главах):
 
-- **`DISCARD-JIT` из jitted-кода снимает страницу под собой** — вызывать его следует из интерпретируемого контекста.
-- **Колбэков C→Lisp во FFI нет** (в embedding API есть — `qualisp_register_prim`).
-- **FFI-трамплин на Windows — SysV-only**: `FFI-LOAD` работает, `FFI-DEFUN`/вызов падает.
-- **Trait-объекты отложены**: диспетч трейта — lookup + ветка; динамический dispatch на базе vtable-trait не реализован.
-- **Бектрейс из JIT-кода несёт мастер-форму** вызываемого (нативный код без unwind); **TCO схлопывает кадры** хвостовой рекурсии — промежуточных кадров в трейсе не будет.
-- **У JIT-страниц и HLO-ядер нет `.pdata`**: исключение не должно пересекать нативный кадр.
-- **Асинхронный слой: при трёх и более воркерах возможна порча значения** в задачах с циклом по переменной `let` — гонка в общем состоянии интерпретатора не локализована. Пул по умолчанию последовательный (один воркер), `QUALISP_THREADS` поднимает число воркеров на риск оператора.
-- **Скомпилированные пути следуют fast-math**: перегруппировка float разрешена, побитового паритета с интерпретатором нет (семантика — на интерпретаторе, биты float — нет); числовые проверки — через пороги и `(FINITE? t)`.
-- **GPU-бэкенда нет**: устройство одно — CPU; CUDA/ROCm-кода в проекте нет, интерфейс `Device` оставлен на будущее.
-- **HLO**: в нативный стенсиль попадают только F32 и I32 — f16 идёт в интерпретаторный фоллбэк; `ROUTE`, `COMPOSITE`, `EXP/DIV/SUM/MAX` и смешанные broadcast/reduce-маски исполняются фоллбэком; `GRAPH->PROGRAM` с claims отказывает.
-- **Окна read-only**: `T-ROWS`/`T-SLICE` над trainable-параметром не дают обучать строки — для таблиц нужен `EMB-LOOKUP`/`T-GATHER!` + `ADAM-SPARSE-STEP`; tied embeddings со sparse-шагом теряют плотный градиент.
-- **`let` под биндингом с 1- или 2-байтным dtype** теряет свои биндинги (обход — `defvar`).
-- **Глубокая не-хвостовая рекурсия** переполняет стек; self-хвостовой вызов оптимизируется и глубину не наращивает.
-- **Острова циклов** (ячейка ссылается на саму себя) не собираются: GC в языке нет.
+- **Статическая типизация строгая**: `:any` запрещён, аннотации обязательны; ламбда-литерал нельзя вызвать напрямую — только через `funcall`.
+- **GPU-бэкенда нет**: `Device` в реализации отсутствует; вычисления идут на CPU x86-64 через JIT и AVX2-ядра.
+- **Ограниченный набор платформ**: x86-64 SysV/Win64; других архитектур JIT не поддерживает.
+- **Нет LSP, нет пакетного менеджера**: в релизе есть только `qualisp` и `qprof`; FFI под Windows требует Win64-трамплина.
+- **Нет writable views**: `reshape`/`transpose`/`t-rows` копируют данные; `t-slice` отсутствует.
+- **Ограничения тензорного API**: `tensor-shape`, `t+`, `t*`, `tensor-dtype`, `sigmoid` отсутствуют — elementwise делает обычный `+`/`*`; `softmax` и `argmax` работают только с 1-D.
+- **Нет пользовательских перегрузок**: одно имя — одно определение.
+- **Ограничения stdlib**: 11 модулей, `async` отдельным модулем не существует (есть примитивы `future`/`await`), `FFI` и `NS` не являются импортируемыми модулями.
+- **Образы и сериализация**: QSRD v1/Q2 и `save-image`/`save-weights` есть, но `qsrd-save`/`qsrd-load` как API отсутствуют.
+- **Тестирование**: 834 плоских теста в `zig build test`, без системы сюит `deftest`/`run-tests`.
 
 ## Лицензия
 
-Компилятор Qualisp распространяется под лицензией **GPLv3** (`LICENSE.md` в репозитории компилятора); эта книга — под MIT.
+Условия использования компилятора определяются его репозиторием; эта книга — документация проекта.
