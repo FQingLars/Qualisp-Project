@@ -1,34 +1,36 @@
 # Глава 15. Стандартная библиотека
 
-Стандартная библиотека Qualisp 0.19.15 — это **11 модулей**, написанных на самом Qualisp и вшитых в бинарник через `@embedFile` (`src/stdlib.zig`). Никакой внешней среды с `pip`-пакетами: всё, что нужно программе, уже лежит в исполняемом файле. `core` грузится при старте как **prelude**, остальные модули подключаются **лениво** при первом `import`; повторный импорт идемпотентен. Порядок загрузки в `Session.init` фиксирован: `core`, `string`, `collections`, `test`.
+Стандартная библиотека Qualisp 0.19.16 — это **13 модулей**, написанных на самом Qualisp и вшитых в бинарник через `@embedFile` (`src/stdlib.zig`). Никакой внешней среды с `pip`-пакетами: всё, что нужно программе, уже лежит в исполняемом файле. `core` и `error` грузятся при старте как **prelude**, остальные модули подключаются **лениво** при первом `import`; повторный импорт идемпотентен. Порядок `base_modules` фиксирован: `core`, `error`, `string`, `collections`, `test`, `ml`, `dl`, `symbolic`, `argparse`, `tablet`, `io`, `datetime`, `neuro` (`src/stdlib.zig`). `Session.loadPrelude` грузит и импортирует ровно `core` и `error` (`src/session.zig`).
 
 | Модуль | Файл | Экспорты | Содержание | Python-аналог |
 |---|---|---|---|---|
-| `core` | `src/stdlib/core.qlsp` | 2 | `caar`, `identity` — базовые утилиты над `:syntax` и generic-тождество | `builtins` |
+| `core` | `src/stdlib/core.qlsp` | 2 | prelude: `caar`, `identity` — базовые утилиты над `:syntax` и generic-тождество | `builtins` |
+| `error` | `src/stdlib/error.qlsp` | 17 | prelude: `error` / `call-frame`, категории, конструкторы и аксессоры | `Exception` + `traceback` |
 | `string` | `src/stdlib/string.qlsp` | 11 | строки: поиск, паддинг, разбиение на строки/слова, приведение к fixnum | `str` |
 | `collections` | `src/stdlib/collections.qlsp` | 14 | свёртки, поиск, срезы по предикату, `unique`, `zip-with` | `functools` + `itertools` |
 | `test` | `src/stdlib/test.qlsp` | 2 | `assert-fixnum`, `assert-string` — аварийные утверждения | `assert` / `pytest` |
 | `io` | `src/stdlib/io.qlsp` | 4 | файлы, построчное чтение, потоковые хэндлы, макрос `with-file` | `open`, `pathlib` |
 | `ml` | `src/stdlib/ml.qlsp` | 13 | метрики, разбиение выборки, масштабирование, `t-mse` | `sklearn.metrics` + `sklearn.preprocessing` |
 | `dl` | `src/stdlib/dl.qlsp` | 17 | логиты слоёв, MSE, SGD/Adam/momentum, замкнутый шаг линейной регрессии | `torch.nn` + `torch.optim` |
-| `symbolic` | `src/stdlib/symbolic.qlsp` | 16 | сопоставление, переписывание, упрощение, `diff`, `unify`, полиномы | `sympy` |
+| `symbolic` | `src/stdlib/symbolic.qlsp` | 17 | сопоставление, переписывание, упрощение, `diff`, `grad`, `unify`, полиномы | `sympy` |
 | `argparse` | `src/stdlib/argparse.qlsp` | 4 | сканер аргументов: `flag?`, `option-value`, `require-option`, `positionals` | `argparse` (сканирование) |
 | `tablet` | `src/stdlib/tablet.qlsp` | 2 | числовая таблица: `defstruct` + `deftrait`/`impl`, методы на `:f32` | `pandas.DataFrame` |
-| `neuro` | `src/stdlib/neuro.qlsp` | 2 | мост символьный терм → тензорный код: `term`, `term->code` | (нет прямого аналога) |
+| `datetime` | `src/stdlib/datetime.qlsp` | 14 | UTC-календарь, epoch, ISO-8601, таймеры | `datetime` (UTC-часть) |
+| `neuro` | `src/stdlib/neuro.qlsp` | 3 | мост символьный терм → тензорный код: `term`, `term->code`, `term-problem` | (нет прямого аналога) |
 
-Есть ещё **`src/stdlib/probe.qlsp`** — но это test-only фикстура: она вшивается только в test-сборки (`builtin.is_test`) и **не является модулем для пользователя**. Модулей ровно одиннадцать.
+Есть ещё **`src/stdlib/probe.qlsp`** и **`src/stdlib/typepairs_probe.qlsp`** — test-only фикстуры: они вшиваются только в test-сборки (`builtin.is_test`) и **не являются модулями для пользователя**. Модулей ровно тринадцать.
 
-> 🐍 «11 вшитых модулей в одном бинарнике» — это монолитный Docker-образ с предустановленными `numpy/torch/sklearn/pandas/sympy`, только без GIL, без 4 ГБ зависимостей и без `pip install`.
+> 🐍 «13 вшитых модулей в одном бинарнике» — это монолитный Docker-образ с предустановленными `numpy/torch/sklearn/pandas/sympy`, только без GIL, без 4 ГБ зависимостей и без `pip install`.
 
-Модули `audio`, `async`, `ns`, `pkg` в релиз не входят; `qualisp-lsp` и `qvalent` в исходниках отсутствуют. Вместо тестового фреймворка `deftest`/`run-tests` есть только `assert-*`, падающие через `throw`.
+Модули `audio`, `async`, `ns`, `pkg` и менеджер `qvalent` в исходниках отсутствуют. LSP (`libqualisplsp`, Rust-сервер `qualisp-lsp`, расширение для VSCodium) есть **в исходниках**, но его бинарник и VSIX в релизные ассеты не входят (гл. 16.7). Вместо тестового фреймворка `deftest`/`run-tests` есть только `assert-*`, падающие через `throw`; прогон — внешний (`zig build test`).
 
-## 15.1 core — всегда загружен
+## 15.1 core и error — всегда загружены
 
-`core` — единственный модуль, который не нужно импортировать: он установлен как prelude при старте сессии. Два экспорта:
+`core` и `error` — два модуля, которые не нужно импортировать: `Session.loadPrelude` грузит их при старте сессии. У `core` два экспорта:
 
 ```lisp
-(caar x :syntax) :syntax = (car (car x))
-(identity x :a) :a       ; x
+(defun caar ((x . :syntax)) ((car (car x)) . :syntax))
+(defun identity ((x . :a)) (x . :a))
 ```
 
 ```lisp
@@ -36,7 +38,7 @@
 (identity 5)        ; → 5
 ```
 
-`identity` — generic-функция с переменной типа `:a`: это демонстрация параметрического полиморфизма. `caar` работает над `:syntax`, а не над `(:list T)`: если нужен `car` от обычного списка, он доступен как примитив.
+`identity` — generic-функция с переменной типа `:a`: это демонстрация параметрического полиморфизма. `caar` работает над `:syntax`, а не над `(:list T)`: если нужен `car` от обычного списка, он доступен как примитив. Второй prelude-модуль, `error`, нужен также рантайму: `throw` и рантайм-ошибки создают структуры по его тегам. Его API разобран в §15.13.
 
 > 🐍 `identity` ≈ тождественная функция `lambda x: x`; `caar` ≈ `lambda x: x[0][0]`, только аргумент — S-выражение как данные (`:syntax`), а не питоновский список.
 
@@ -114,7 +116,7 @@
 
 ;; потоковый хэндл с гарантированным закрытием
 (print (with-file (f "/tmp/t.txt" #\r) (read-line f)))  ; → "a"
-(each-line "/tmp/t.txt" (lambda (s :string) :bool (print s)))  ; → nil
+(each-line "/tmp/t.txt" (lambda ((s . :string)) (print s) t))  ; → nil
 ```
 
 `(with-file (name path mode) body...)` — **макрос**: тело остаётся обычным кодом, файл закрывается и на успехе, и на `throw`. Внутри используется `catch-error` + `result-ok?`/`result-value`/`result-message`; `throw` внутри тела перевыбрасывается после закрытия. `each-line` явно повторяет тот же протокол open/catch/close. `or-else` распаковывает option после `null`-проверки:
@@ -124,7 +126,7 @@
   (if (null line) nil (funcall f (or-else line ""))))
 ```
 
-CSV, regex, аудио и работа с датой-временем в stdlib 0.19.15 **не входят**: для разбора строк используйте `string-split`/`substr`, для данных — `tablet`.
+CSV, regex и аудио в stdlib 0.19.16 **не входят**: для разбора строк используйте `string-split`/`substr`, для данных — `tablet`. Дата и время теперь есть — это модуль `datetime` (§15.18). Вызов `with-file` не менялся: `defmacro` — единственное место, где параметры по-прежнему записываются позиционно (гл. 12).
 
 > 🐍 `with-file` ≈ `with open(path, mode) as f:`, только это макрос, раскрывающийся в `let` + `catch-error`, а не контекстный менеджер рантайма.
 
@@ -176,6 +178,8 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 
 > 🐍 `assert-fixnum` ≈ `assert a == b, f"expected {b}, got {a}"`; `run-tests`/`pytest` в релизе нет, прогон тестов — внешний (`zig build test`).
 
+В 0.19.16 тесты есть **на каждую экспортируемую функцию** `tablet`, `ml`, `dl`, `symbolic`, `neuro`, `argparse`, `io`, `string`, `collections`. Всего `zig build test` прогоняет **910 тестов** (909 именных `test "…"` плюс один анонимный блок в `src/tests.zig`) на Linux и Windows.
+
 ## 15.6 ml — метрики и подготовка данных
 
 13 экспортов. Метрики определены на непустом `(:list :flonum)`; fixnum-входы расширяются до flonum при унификации, поэтому `(mean (list 1 2 3))` типизируется без второго имени.
@@ -224,14 +228,18 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 ```lisp
 (import dl)
 
-(defvar wx (:tensor :f32 (_ _)) (tensor ((1.0 2.0))))
-(defvar gy (:tensor :f32 (_ _)) (tensor ((0.5 -0.5))))
-(print (mse-loss wx gy))           ; → скаляр :flonum
-(print (linear-forward wx gy gy))  ; → (_ _) — логиты
-(defvar st (:struct adam-state) (adam-init wx))
-(setq st (adam-step st gy 0.01))
-(print (adam-steps st))            ; → 1
+(defvar x ((tensor ((1.0 2.0))) . (:tensor :f32 (1 2))))
+(defvar w ((tensor ((1.0 0.0) (0.0 1.0))) . (:tensor :f32 (2 2))))
+(defvar b ((tensor ((0.5 -0.5))) . (:tensor :f32 (1 2))))
+(defvar y ((tensor ((1.5 1.5))) . (:tensor :f32 (1 2))))
+(print (mse-loss (linear-forward x w b) y))  ; → 0.0 — скаляр :flonum
+(print (linear-forward x w b))               ; → (_ _) — логиты
+(defvar st ((adam-init w) . (:struct adam-state)))
+(setq st (adam-step st (tensor ((0.5 -0.5) (0.1 -0.1))) 0.01))
+(print (adam-steps st))                       ; → 1
 ```
+
+Пример проверен бинарём 0.19.16. Обратите внимание на формы: `linear-forward` считает `xW + b`, поэтому веса `w` имеют форму `(2 2)` при входе `(1 2)`, а градиент для `adam-step` должен совпадать с формой весов.
 
 В autograd-цикле веса обновляются **на месте** `tset!` по `(grad-of w)`, а не `sgd-step`: результат шага имеет wildcard-форму `(_ _)` и не присваивается конкретной форме `(2 1)` (см. гл. 17). Имя `mse` уже занято модулем `ml`, поэтому тензорная потеря называется `mse-loss` — два экспорта с одним именем из разных модулей дали бы `ImportConflict`.
 
@@ -239,7 +247,7 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 
 ## 15.8 symbolic — символьный движок
 
-16 экспортов. Терм — `:syntax`, обычное S-выражение; переменные образца — символы с префиксом `?`. Окружение — alist; **пустое окружение — `t`**, а не `nil` (nil уже значит «не совпало»). `subst` принимает `t`, `nil` и настоящий alist.
+17 экспортов. Терм — `:syntax`, обычное S-выражение; переменные образца — символы с префиксом `?`. Окружение — alist; **пустое окружение — `t`**, а не `nil` (nil уже значит «не совпало»). `subst` принимает `t`, `nil` и настоящий alist.
 
 ```lisp
 (import symbolic)
@@ -266,9 +274,22 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 |---|---|---|
 | Базовые | `variable?`, `free-of?`, `match`, `subst` | `match` → `(:option :syntax)` |
 | Переписывание | `rewrite`, `rewrite-all`, `simplify` | один шаг / до неподвижной точки с обязательным `limit` / константы и `x+0`, `x*1`, `x*0` |
-| Дифференцирование | `diff`, `diff-canonical` | `+ - * / ^`, упрощение; `diff` **не приводит подобные**: `d(x*x)/dx = (+ x x)`; `diff-canonical` даёт `(* 2 x)` |
+| Дифференцирование | `diff`, `diff-canonical`, `grad` | `diff`: n-арные `+ - *`, унарный минус, `/`, `^`, унарные `sin/cos/exp/log/sqrt/tanh/atan`; `diff` **не приводит подобные**: `d(x*x)/dx = (+ x x)`, а `diff-canonical` даёт `(* 2 x)`. `grad` — reverse-mode градиент скалярного лосса, см. ниже |
 | Логика | `unify`, `derive`, `matches` | унификация с occurs-check; `derive`/`matches` возвращают `:syntax` |
 | Полиномы (S3) | `collect`, `poly?`, `poly-coeffs`, `poly-eval` | нормальная форма «сумма мономов»; плотные коэффициенты от степени 0; нулевой полином — `(0)` |
+
+`(grad term var)` — **reverse-mode градиент скалярного лосса `(tsum term)`**, а не поэлементная производная, как `diff`. Формы сохраняются отдельными тензорными операциями, чтобы `simplify` не склеивал их в арифметику:
+
+```lisp
+(grad '(tsum x) 'x)             ; → (ONES-LIKE X)
+(grad '(tmax x) 'x)             ; → (TMAX-MASK X)
+(grad '(tsum (relu x)) 'x)      ; → (* (ONES-LIKE (RELU X)) (RELU-MASK X))
+(grad '(tsum (matmul x y)) 'x)  ; → (MATMUL (ONES-LIKE (MATMUL X Y)) (TRANSPOSE Y))
+```
+
+Правила покрывают `+ - * / ^`, `tsum/tmean/tmax`, `matmul`, `relu`, `softmax` (1-D), `transpose`, `reshape`, `ones-like`/`tmax-mask`/`relu-mask` и унарные `sin…atan`; `diff` на `relu`, `matmul`, `transpose`, `reshape`, `softmax` отвечает внятным отказом с указанием перейти к `grad`. Для n-арной арифметики: `(diff '(+ x 1 2) 'x)` → `1`, `(diff '(* 2 3 x) 'x)` → `6`, `(diff '(sin x) 'x)` → `(COS X)`.
+
+`(^ base n)` — синтаксис символьных термов, а не функция языка; для составного основания подтерм связывается один раз через `let`: `(^ (+ x 1) 3)` → `(LET ((POW-0 (+ X 1))) (* POW-0 POW-0 POW-0))`.
 
 `collect` — нормальная форма: `(* x x)` → `(^ x 2)`, `-` сворачивается в сумму с отрицательным коэффициентом, порядок — первое появление. Списки термов типизируются как `:syntax`, а не `(:list :syntax)`: `cons` с `:syntax`-аргументом даёт `:syntax`.
 
@@ -276,26 +297,27 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 
 ## 15.9 neuro — мост терм → тензор
 
-Два экспорта: макрос `term` и функция `term->code`.
+Три экспорта: макрос `term`, функция `term->code` и `term-problem`.
 
 ```lisp
 (import neuro)
 
-(defun f (x (:tensor :f32 (4))) (:tensor :f32 (4))
-  (term '(+ (sin x) (* x x)) '(x)))
+(defun f ((x . (:tensor :f32 (4))))
+  ((term '(+ (sin x) (* x x)) '(x)) . (:tensor :f32 (4))))
 
-(defvar c (:tensor :f32 (1)) (param (tensor (2.0))))
-(defgraph sq (c (:tensor :f32 (1)) x (:tensor :f32 (4))) :flonum
-  (term '(tsum (* c (* x x))) '(c x)))   ; grad! заполнит grad-of c
+(defvar c ((param (tensor (2.0))) . (:tensor :f32 (1))))
+(defgraph sq ((c . (:tensor :f32 (1))) (x . (:tensor :f32 (4))))
+  ((term '(tsum (* c (* x x))) '(c x)) . :flonum))   ; grad! заполнит grad-of c
 ```
 
 | Возможность | Что транслируется |
 |---|---|
-| Арифметика | `+ - * /`, унарный `-`; скаляры идут broadcast |
-| Матрицы | `matmul` |
-| Унарные | `sin cos tanh exp log sqrt relu atan` |
+| Арифметика | n-арные `+ - * /`, унарный `-`; скаляры идут broadcast |
+| Матрицы | `matmul`, `transpose` |
+| Унарные | `sin cos tanh exp log sqrt relu atan`, `softmax` |
 | Свёртки | `tsum tmean tmax` |
-| Степень | `^ n` → произведение; `n=0` → `1.0`, `n<0` → `(/ 1.0 (* …))` |
+| Формо-сохраняющие ops | `ones-like`, `tmax-mask`, `relu-mask`, `reshape-like`, `reshape` |
+| Степень | `^ n` → произведение; `n=0` → `1.0`, `n<0` → `(/ 1.0 (* …))`; составное основание связывается один раз через `let` |
 
 Оба аргумента `term` обязаны быть **литералами**: макрос раскрывается до типизации. `term->code` — то же над значением `:syntax`. Переменные обязаны быть перечислены в `vars`: глобал в графе — константа без градиента. Проверка отделена от генерации: `term-problem` возвращает первое сообщение, не бросая; `term->code` бросает ровно один раз — иначе после `throw` вторичная диагностика («unsupported atom 1» вместо «unknown variable Y»). Один терм годится и для eager-функции, и для `defgraph` (в том числе в ветках `ns-if`), и для сверки аналитического `diff` с autograd — см. гл. 17.
 
@@ -308,8 +330,8 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 ```lisp
 (import tablet)
 
-(defvar tab (:struct tablet) (make-tablet (list 'a 'b)
-                                 (tensor ((1.0 2.0) (3.0 4.0)))))
+(defvar tab ((make-tablet (list 'a 'b)
+                          (tensor ((1.0 2.0) (3.0 4.0)))) . (:struct tablet)))
 (nrows tab)          ; → 2
 (ncols tab)          ; → 2
 (column-names tab)   ; → (A B)
@@ -367,9 +389,51 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 
 ## 15.13 Ошибки и бектрейс
 
-Ошибки — значения `(:result T)` (`ok T | err Error`) плюс примитивы `throw : :a → :never` и `catch-error : (:func () T) → (:result T)`. `try` как форма в REPL-пробе недоступен; рабочий путь — `catch-error` + `result-ok?`/`result-value`/`result-message`.
+Ошибки — значения `(:result T)` (`ok T | err Error`) плюс примитивы `throw : :a → :never` и `catch-error : (:func () T) → (:result T)`. `try` как форма в бинаре недоступна (`unknown function TRY`); рабочий путь — `catch-error` + `result-ok?`/`result-value`/`result-message`, а для разбора неудачи — `result-error` и `format-error`.
 
-`Error` несёт `message`, `cause`, `traceback`; бэктрейс — кадры `(name file line form)`. Наконец, source maps в эмиттере дают позицию в ошибках рантайма: CLI печатает `file:line:col: message`, а при отсутствии diag — `place: message` из `error_location`, иначе `error: …`.
+Модуль `error` уже загружен как prelude; `(import error)` можно написать явно для читаемости. Он определяет две структуры и типизированный доступ к ним:
+
+```lisp
+(defstruct call-frame
+  ((name . :symbol)
+   (file . :string)
+   (line . :fixnum)
+   (form . :string)))
+
+(defstruct error
+  ((message . :string)
+   (cause . (:option :atom))
+   (traceback . (:option (:list (:struct call-frame))))
+   (kind . :symbol)))
+```
+
+Категории — интернированные символы, сравниваются `eq`: `runtime-error` = `'runtime`, `parse-error` = `'parse`, `type-error` = `'type`, `io-error` = `'io`, `user-error` = `'user`. Конструкторы и аксессоры: `make-error message kind`, `with-cause e cause`, `error-message`, `error-cause`, `error-traceback`, `error-kind`, `error-of?` (сравнивает `kind` с символом), `call-frame-name/-file/-line/-form`. Экспортируются и сами структуры, и категории.
+
+`throw` кладёт брошенное значение в `cause`, в `message` пишет его печатное представление, `kind` = `'user`; у рантайм-ошибки `kind` = `'runtime`. Кадры `call-frame` наполняются из source map Q4a: `name/file/line/form`, при отсутствии места — `file="<unknown>"`, `line=0`, `form=""`.
+
+Два примитива связывают структуру с печатью:
+
+| Примитив | Контракт | Что делает |
+|---|---|---|
+| `result-error` | `(:result T) → (:struct error)` | достаёт структуру ошибки из неудачного результата; на ok-результате — `RuntimeError` |
+| `format-error` | `(:struct error) → :string` | собирает текст `Error: <message> (<kind в нижнем регистре>)`, затем строку `cause:` (если причина отличается от сообщения) и кадры `at <name>  <file>:<line>  in <form>` |
+
+Кадры без источника печатаются без фиктивного `<unknown>:0`; внутренние теги (`ERROR::…`) в отчёт не попадают. Пример из REPL (диагностика `error-message` и `format-error` проверена бинарём):
+
+```lisp
+(import error)
+(result-error (catch-error (lambda () (throw 42))))
+;; → #<ERROR::ERROR "42" 42 (#<ERROR::CALL-FRAME LAMBDA "<repl>" 1 "(THROW 42)">) USER>
+(error-message (result-error (catch-error (lambda () (throw 42))))) ; → "42"
+(error-kind (result-error (catch-error (lambda () (throw 42)))))    ; → USER
+(error-cause (result-error (catch-error (lambda () (throw 42)))))   ; → 42
+(format-error (result-error (catch-error (lambda () (throw 42)))))
+;; → "Error: 42 (user)\n  at LAMBDA  <repl>:1  in (THROW 42)"
+```
+
+Принтер структур печатает `#<tag …>` вместо `#<struct>`; тег ошибки — приватный псевдоним модуля (`ERROR::ERROR`, `ERROR::CALL-FRAME`), а `print` и `write-to-string` расходятся только в кавычках: `print` даёт `#<ERROR::ERROR x nil nil IO>`, `write-to-string` — `"#<ERROR::ERROR \"x\" nil nil IO>"`. Глобальной функции `traceback` нет — доступ к кадрам даёт `error-traceback` (`unknown function TRACEBACK` при попытке вызвать `traceback`). На кадре из `error-traceback` аксессоры `call-frame-*` в текущем бинаре дают `no overload matches the arguments`; для чтения трейса используйте `format-error`.
+
+Непойманный `throw` в файловом раннере печатает `file:line:col: message` и завершается с exit 1; в REPL — только `error: RuntimeError`.
 
 | Поле кадра | Что несёт | Python |
 |---|---|---|
@@ -378,9 +442,9 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 | `line` | номер строки | `lineno` |
 | `form` | форма, вычислявшаяся в кадре | `line` (текст, а не AST) |
 
-Порядок кадров — oldest → newest. Кадр из JIT-кода несёт **мастер-форму** вызываемого: нативная страница — выбрасываемый кэш S-выражения. Хвостовые вызовы (TCO) схлопывают кадры: хвостовой цикл даёт один кадр независимо от глубины — это контракт, а не потеря информации.
+Порядок кадров — oldest → newest. Кадр из JIT-кода несёт **мастер-форму** вызываемого: нативная страница — выбрасываемый кэш S-выражения. Хвостовые вызовы (TCO) схлопывают кадры: хвостовой цикл даёт один кадр независимо от глубины — это контракт, а не потеря информации. Поэтому в демо `examples/error-demo.qlsp` функции `middle`/`outer` намеренно не хвостовые — иначе в трейсе не было бы нескольких кадров.
 
-> 🐍 `traceback.extract_tb(e.__traceback__)` отдаёт `FrameSummary(filename, lineno, name, line)`; Qualisp-кадр вместо текста строки хранит саму форму, а схлопывание хвостовых кадров — семантика Scheme, в Python её нет.
+> 🐍 `traceback.extract_tb(e.__traceback__)` отдаёт `FrameSummary(filename, lineno, name, line)`; Qualisp-кадр вместо текста строки хранит саму форму, а схлопывание хвостовых кадров — семантика Scheme, в Python её нет. `error-kind` и `error-of?` заменяют разбор текста исключения вручную.
 
 ## 15.14 Загрузка модулей: лениво и идемпотентно
 
@@ -390,8 +454,8 @@ CSV, regex, аудио и работа с датой-временем в stdlib 
 
 - модуль грузится лениво при первом `import`/`import-from`;
 - повторный импорт идемпотентен;
-- `core` — предустановленный prelude, остальные требуют явного импорта;
-- явного `MODULE`-заголовка с описью зависимостей в 0.19.15 нет — зависимости модуля определяются его телом;
+- `core` и `error` — предустановленный prelude, остальные требуют явного импорта;
+- явного `MODULE`-заголовка с описью зависимостей в 0.19.16 нет — зависимости модуля определяются его телом;
 - `macroexpand-all` раскрывает рекурсивно, не заходя в `quote`.
 
 CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; флаги интерпретатора разбираются только до имени скрипта, всё после — program args (`command-line-args`). Файловый раннер не печатает результат последней формы — только явный `print`.
@@ -403,18 +467,20 @@ CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; ф�
 | Модуль | Назначение | Python-аналог |
 |---|---|---|
 | `core` | `caar`, `identity`, prelude | `builtins` |
+| `error` | `error`/`call-frame`, категории, `result-error`, `format-error`, prelude | `Exception` + `traceback` |
 | `string` | поиск, паддинг, строки/слова, `string-to-fixnum` | `str` |
 | `collections` | `sum`, `find`, `position`, `take/drop-while`, `zip-with`, `unique` | `functools` + `itertools` |
 | `test` | `assert-fixnum`, `assert-string` | `assert` |
 | `io` | файлы, `read-lines`, `with-file`, `each-line` | `open` + контекстный менеджер |
 | `ml` | метрики, split, масштабирование, `t-mse` | `sklearn.metrics` / `preprocessing` |
 | `dl` | логиты, MSE, SGD/Adam/momentum, линейная регрессия | `torch.nn` / `torch.optim` |
-| `symbolic` | match/rewrite/diff/unify, полиномы | `sympy` |
+| `symbolic` | match/rewrite/diff/grad/unify, полиномы | `sympy` |
 | `argparse` | флаги, значения опций, позиционные аргументы | `argparse` |
 | `tablet` | числовая таблица `:f32`, методы через `deftrait` | `pandas.DataFrame` |
-| `neuro` | символьный терм → тензорный код | `sympy.lambdify` |
+| `datetime` | UTC, epoch, ISO-8601, таймеры | `datetime` (UTC-часть) |
+| `neuro` | символьный терм → тензорный код, `term-problem` | `sympy.lambdify` |
 
-Итого 11. `probe.qlsp` — test-only фикстура, не двенадцатый модуль.
+Итого 13. `probe.qlsp` и `typepairs_probe.qlsp` — test-only фикстуры, не модули.
 
 ## 15.16 collections — свёртки и поиск по спискам
 
@@ -425,18 +491,18 @@ CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; ф�
 
 (sum (list 1 2 3))                ; → 6
 (keep-positive (list -1 2 3))     ; → (2 3); всё отрицательное → nil
-(any (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))   ; → t
-(all (lambda (x :fixnum) :bool (> x 0)) (list 1 2 3))   ; → t
-(count-if (lambda (x :fixnum) :bool (> x 1)) (list 1 2 3)) ; → 2
+(any (lambda ((x . :fixnum)) (> x 2)) (list 1 2 3))   ; → t
+(all (lambda ((x . :fixnum)) (> x 0)) (list 1 2 3))   ; → t
+(count-if (lambda ((x . :fixnum)) (> x 1)) (list 1 2 3)) ; → 2
 (last (list 1 2 3))               ; → 3
 (range 5)                         ; → (0 1 2 3 4); n ≤ 0 → nil
 (member? 2 (list 1 2 3))          ; → t
-(find (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))  ; → 3
-(position (lambda (x :fixnum) :bool (= x 2)) (list 1 2 3)) ; → 1
-(take-while (lambda (x :fixnum) :bool (< x 3)) (list 1 2 3)) ; → (1 2)
-(drop-while (lambda (x :fixnum) :bool (< x 3)) (list 1 2 3)) ; → (3)
+(find (lambda ((x . :fixnum)) (> x 2)) (list 1 2 3))  ; → 3
+(position (lambda ((x . :fixnum)) (= x 2)) (list 1 2 3)) ; → 1
+(take-while (lambda ((x . :fixnum)) (< x 3)) (list 1 2 3)) ; → (1 2)
+(drop-while (lambda ((x . :fixnum)) (< x 3)) (list 1 2 3)) ; → (3)
 (unique (list 1 2 1 3))           ; → (1 2 3) — порядок сохранён
-(zip-with (lambda (a :fixnum b :fixnum) :fixnum (+ a b)) (list 1 2) (list 10 20)) ; → (11 22)
+(zip-with (lambda ((a . :fixnum) (b . :fixnum)) (+ a b)) (list 1 2) (list 10 20)) ; → (11 22)
 ```
 
 | Экспорт | Сигнатура (упрощённо) | Заметка |
@@ -452,7 +518,7 @@ CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; ф�
 | `member?` | элемент + option-список | `equal` |
 | `unique` | `(:list :a) → (:list :a)` | первый элемент остаётся всегда |
 
-`map`/`filter`/`reduce` — **глобальные примитивы**, не экспорты `collections`; их колбэки обязаны быть типизированы: `(lambda (x :fixnum) :fixnum (* x x))`.
+`map`/`filter`/`reduce` — **глобальные примитивы**, не экспорты `collections`; их колбэки обязаны быть типизированы: `(lambda ((x . :fixnum)) (* x x))`. У `lambda` аннотируются только параметры, тип результата выводится.
 
 > 🐍 `find` ≈ `next(filter(p, xs), None)`, `position` ≈ `next(i for i,x in enumerate(xs) if p(x))` с `None` вместо `StopIteration`, `take/drop-while` ≈ `itertools.takewhile/dropwhile`, `zip-with` ≈ `map(f, xs, ys)`.
 
@@ -489,3 +555,40 @@ lena
 Без явного списка `value-options` сканер не отличит `--out x.txt` (значение) от `--verbose input.txt` (позиционный аргумент).
 
 > 🐍 Это не `argparse.ArgumentParser` с автогенерацией `--help`, а скорее `sys.argv` + несколько аккуратных хелперов: конфигурации нет, типы не конвертируются, зато статические типы известны заранее.
+
+## 15.18 datetime — UTC, ISO-8601 и таймеры
+
+`datetime` — один из 13 встроенных модулей. Он грузится лениво: `(import datetime)`, как и у остальных модулей, кроме prelude `core`/`error`. Время берётся из примитивов поверх `std.Io.Clock`, одинаково на Linux и Windows: `(now)` и `(now-ms)` — epoch UTC в секундах/мс (`:fixnum`), `(monotonic-ns)` — монотонные часы для интервалов, `(sleep-ms n)` — пауза (`:fixnum → :nil`).
+
+```lisp
+(import datetime)
+
+(epoch->utc 0)          ; → #<DATETIME::UTC-DATETIME 1970 1 1 0 0 0>
+(utc->epoch (epoch->utc 0))  ; → 0
+(iso-utc 0)             ; → "1970-01-01T00:00:00Z"
+(iso-utc-date 0)        ; → "1970-01-01"
+(parse-iso-utc "1970-01-01T00:00:00Z")  ; → 0
+(seconds->hms 3661)     ; → (1 1 1)
+(now-iso)               ; → "2026-11-22T20:44:22Z" — живое время
+(timer-elapsed-ms (timer-start))  ; → 0
+(elapsed (+ 1 2))       ; печатает "elapsed: 0 ms", возвращает 3
+```
+
+Экспорт модуля: `utc-datetime epoch->utc utc->epoch iso-utc iso-utc-date parse-iso-utc now-iso seconds->hms timer-start timer-elapsed-ms elapsed-ms elapsed div-floor pad`.
+
+| Экспорт | Контракт | Что делает |
+|---|---|---|
+| `utc-datetime` | `(year month day hour minute second)` — все `:fixnum` | структура UTC-даты |
+| `epoch->utc`, `utc->epoch` | `:fixnum ↔ (:struct utc-datetime)` | алгоритм Хиннанта (`civil_from_days`/`days_from_civil`); даты до 1970 работают |
+| `iso-utc`, `iso-utc-date` | `:fixnum → :string` | `YYYY-MM-DDTHH:MM:SSZ` и первые 10 символов |
+| `parse-iso-utc` | `:string → :fixnum` | принимает и дату без времени; ошибки — `throw` с текстами `datetime: timestamp is too short`, `datetime: expected YYYY-MM-DD`, `datetime: expected T after the date`, `datetime: invalid integer in timestamp` |
+| `seconds->hms` | `:fixnum → (:list :fixnum)` | часы/минуты/секунды |
+| `timer-start`, `timer-elapsed-ms`, `elapsed-ms` | `:fixnum`-метка времени, миллисекунды | таймеры на `monotonic-ns` |
+| `elapsed` | макрос | печатает `elapsed: … ms` и возвращает значение формы |
+| `div-floor`, `pad` | `:fixnum :fixnum → :fixnum`, `:string :fixnum → :string` | утилиты (эвклидово деление и ведущие нули) |
+
+Дробное деление в языке всегда даёт flonum, поэтому целое деление в модуле сделано через `to-fixnum` и поправку на отрицательный остаток; `div-floor -7 2` даёт `-4`. `or-else` — **функция, без короткозамыкания**: `(or-else v (throw …))` бросает всегда, поэтому в `parse-int` используется `if` + `null`. Макрос `elapsed` написан в позиционной форме `(defmacro elapsed (expr :syntax) :syntax …)` — это исключение из общего правила парных аннотаций (гл. 12).
+
+Локальное время и таймзоны в v1 не входят: все функции работают в UTC. В `src/stdlib_datetime_test.zig` шесть именных тестов: epoch zero, leap years, ISO roundtrip, ISO errors, time splits and timers, primitives typed.
+
+> 🐍 `epoch->utc`/`utc->epoch` ≈ `datetime.datetime.utcfromtimestamp` и `.timestamp()`, `iso-utc` ≈ `.strftime("%Y-%m-%dT%H:%M:%SZ")`, а `timer-elapsed-ms` ≈ `time.monotonic()` с разницей в миллисекундах; таймзоны и `localtime()` пока не поддерживаются.

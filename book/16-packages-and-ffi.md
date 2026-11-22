@@ -1,17 +1,18 @@
 # Глава 16. Пакеты и FFI
 
-В 0.19.15 «пакетная экосистема» в привычном смысле отсутствует. Внешний код попадает в программу тремя способами: быть частью встроенной stdlib (`import`), быть отдельным `.qlsp`-файлом, запущенным раннером, или быть разделяемой C-библиотекой через FFI. Ни `qvalent`, ни `pkg-install`, ни `http-get`, ни LSP в релизе нет. Зато есть собственный бинарный формат QSRD, инструменты `tools/qsrd` и `tools/qprof` и кросс-платформенный FFI-трамплин.
+В 0.19.16 «пакетная экосистема» в привычном смысле отсутствует. Внешний код попадает в программу четырьмя способами: быть частью встроенной stdlib (`import`), быть отдельным `.qlsp`-файлом, запущенным раннером, быть разделяемой C-библиотекой через FFI или подключить LSP-сервер из исходников для редактора. Ни `qvalent`, ни `pkg-install`, ни `http-get` нет. Зато есть собственный бинарный формат QSRD, инструменты `tools/qsrd` и `tools/qprof`, кросс-платформенный FFI-трамплин и LSP (`libqualisplsp` + `qualisp-lsp`) — но LSP-бинарник и VSIX **в релизные ассеты не входят** (§16.7).
 
 ## 16.1 Способы подключить код
 
 | Способ | Что это | Python-аналог |
 |---|---|---|
-| `(import модуль)` | один из 11 встроенных модулей, вшитых в бинарник | `import` из стандартной библиотеки |
+| `(import модуль)` | один из 13 встроенных модулей, вшитых в бинарник | `import` из стандартной библиотеки |
 | отдельный `script.qlsp` | файл, переданный раннеру `qualisp script.qlsp [args…]` | `python script.py` |
 | `(ffi-load path)` + `(ffi-defun …)` | разделяемая C-библиотека с объявленными сигнатурами | `ctypes.CDLL` + `argtypes`/`restype` |
 | `(save-image …)` / `(load-image …)` | снимок пользовательского мира в QSRD | `pickle` + восстановление сессии |
+| LSP из исходников | `libqualisplsp` (C ABI) + `qualisp-lsp` (Rust) + расширение VSCodium; собирается локально, не входит в ассеты | `pyright`/`rust-analyzer`, установленный из исходников |
 
-Пакетного менеджера `qvalent` **в релизе нет** — нет ни CLI, ни манифеста `qvalent.toml`, ни команды `qvalent get user/repo`. Нет и модуля `pkg` с `(pkg-install …)`: сетевых примитивов `http-get` в рантайме нет. Это не «урезанный» менеджер, а осознанный non-goal: среда целиком лежит в бинарнике, а расширение — либо FFI, либо свои файлы.
+Пакетного менеджера `qvalent` **нет** — нет ни CLI, ни манифеста `qvalent.toml`, ни команды `qvalent get user/repo`. Нет и модуля `pkg` с `(pkg-install …)`: сетевых примитивов `http-get` в рантайме нет. Это не «урезанный» менеджер, а осознанный non-goal: среда целиком лежит в бинарнике, а расширение — либо FFI, либо свои файлы; LSP — инструмент разработки, а не пакет.
 
 > 🐍 Вместо `pip install` + `pyproject.toml` — `import` из stdlib и `ctypes` для внешнего кода. Всё остальное — вне среза релиза.
 
@@ -26,7 +27,7 @@
 
 Правила загрузки (подробнее — гл. 15.11–15.14):
 
-- модули — Qualisp-код, вшитый через `@embedFile`; `core` — prelude, остальные ленивые;
+- модули — Qualisp-код, вшитый через `@embedFile`; `core` и `error` — prelude, остальные ленивые;
 - импорт идемпотентен, приватные имена недостижимы, экспорты — алиасы;
 - конфликт публичных имён — `ImportConflict`;
 - неизвестный модуль — `UnknownModule`, неизвестный экспорт — `UnknownExport`;
@@ -49,11 +50,11 @@ $ qualisp script.qlsp --verbose --name lena input.txt
 Для сохранения состояния есть образы QSRD:
 
 ```lisp
-(defvar base :fixnum 10)
-(save-image "/tmp/world.qimg")     ; → nil
+(defvar base (10 . :fixnum))
+(save-image "/tmp/world.qsrd")     ; → nil
 
 ;; в другой сессии
-(load-image "/tmp/world.qimg")     ; → nil
+(load-image "/tmp/world.qsrd")     ; → nil
 base                              ; → 10
 ```
 
@@ -140,7 +141,7 @@ FFI — примитивы рантайма, а не модуль. Реализ�
 - `(f64, u64)` → `xmm0` + `rcx`;
 - `(u64, f64)` → `rcx` + `xmm1` (xmm0 при этом мусор).
 
-Генерируемый код: `push rbx; mov rbx,rdi` → аргументы → `call [target]` → возврат (`rax` для int/ptr, `xmm0` → `ret_i` для f32/f64 через `movq`/`movss`) → `pop rbx; ret`. Проверено под Wine на `kernel32` (`GetCurrentProcessId`, `lstrlenA`, `MultiByteToWideChar` с 6 аргументами), `msvcrt pow` и сгенерированных DLL со смешанными и стековыми аргументами. Тесты: 834 на Linux и 834 на Windows (3 POSIX-FFI пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы).
+Генерируемый код: `push rbx; mov rbx,rdi` → аргументы → `call [target]` → возврат (`rax` для int/ptr, `xmm0` → `ret_i` для f32/f64 через `movq`/`movss`) → `pop rbx; ret`. Проверено под Wine на `kernel32` (`GetCurrentProcessId`, `lstrlenA`, `MultiByteToWideChar` с 6 аргументами), `msvcrt pow` и сгенерированных DLL со смешанными и стековыми аргументами. Тесты: **910 на Linux и 910 на Windows** (3 POSIX-FFI пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы).
 
 | Ограничение | Комментарий |
 |---|---|
@@ -179,13 +180,13 @@ crc32 на секцию → `CorruptImage`; неизвестные секции 
 ### Образ пользовательского мира
 
 ```lisp
-(defstruct pt ((x :fixnum) (y :fixnum)))
-(defun inc (x :fixnum) :fixnum (+ x 1))
-(defvar base :fixnum 10)
-(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
-(defvar add (:func (:fixnum) :fixnum) (let ((k base)) (lambda (x :fixnum) :fixnum (+ x k))))
-(defvar p (:struct pt) (pt 3 4))
-(defvar items (:list :fixnum) (list 1 2 3))
+(defstruct pt ((x . :fixnum) (y . :fixnum)))
+(defun inc ((x . :fixnum)) ((+ x 1) . :fixnum))
+(defvar base (10 . :fixnum))
+(defvar w ((param (tensor ((1.0 2.0) (3.0 4.0)))) . (:tensor :f32 (2 2))))
+(defvar add ((let ((k base)) (lambda ((x . :fixnum)) (+ x k))) . (:func (:fixnum) :fixnum)))
+(defvar p ((pt 3 4) . (:struct pt)))
+(defvar items ((list 1 2 3) . (:list :fixnum)))
 (save-image "@OUT@")
 ```
 
@@ -196,8 +197,8 @@ crc32 на секцию → `CorruptImage`; неизвестные секции 
 Q2 — секция `model`:
 
 ```lisp
-(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
-(defvar b (:tensor :f32 (1)) (param (tensor (0.5))))
+(defvar w ((param (tensor ((1.0 2.0) (3.0 4.0)))) . (:tensor :f32 (2 2))))
+(defvar b ((param (tensor (0.5))) . (:tensor :f32 (1))))
 (save-weights "@OUT@" (list 7 8))
 ```
 
@@ -218,7 +219,7 @@ Q2 — секция `model`:
 
 ## 16.6 CLI, аргументы и трассировка
 
-Раздел сохраняет номер описания embedding C API; в 0.19.15 вместо C-хоста — CLI и внешние инструменты.
+Раздел сохраняет номер описания embedding C API; вместо C-хоста — CLI и внешние инструменты. Отдельный C ABI есть у LSP (`libqualisplsp`), но он analysis-only и собирается из исходников (§16.7).
 
 ```text
 usage: qualisp [--trace <file.json>] [script.qlsp [args...]]
@@ -226,7 +227,7 @@ usage: qualisp [--trace <file.json>] [script.qlsp [args...]]
 
 | Формы/флаги | Поведение |
 |---|---|
-| `--version` | `qualisp 0.19.15`, exit 0 |
+| `--version` | `qualisp 0.19.16`, exit 0 |
 | `--help`, `-h`, `-v` | usage + `error: BadArguments`, exit 1 |
 | `--trace` без файла | `BadArguments` |
 | произвольный аргумент до скрипта | `BadArguments` |
@@ -247,3 +248,38 @@ FIB                           21891      1867136.0       152565.0  100.0%
 Пишется Chrome Trace JSON: события `B`/`E`, микросекунды, `pid=1,tid=1`; трасса пишется и при ошибке. Инструментированы только невидимые из AST точки — границы вызовов функций, вызов HLO-графа, фаза `ns-if`. Компиляция JIT-страницы входит в inclusive-время первого вызова. Агрегатор `tools/qprof` на Rust: `qprof <trace.json> [--top N]`; без аргументов — `usage: qprof <trace.json> [--top N]` (exit 2), `qprof --help` трактует флаг как файл.
 
 > 🐍 `qualisp --trace` + `qprof` ≈ `python -m cProfile script.py` и `pstats.Stats(...).sort_stats('tottime').print_stats(10)`: профиль включается снаружи, а не директивами в исходнике.
+
+## 16.7 LSP и редактор: собирается из исходников
+
+LSP — технологический инструмент, а не модуль и не примитив языка. В `(import LSP)` получается `error: UnknownModule`, а Lisp-фор `lsp-hover`, `lsp-diagnostics` и т. п. в бинаре нет. Сервер — отдельный процесс, говорящий по stdio JSON-RPC.
+
+**Один источник истины.** Синтаксис, типы и диагностика живут в Zig-компиляторе; Rust — только протокольная оболочка: нет второго ридера, чекера или AST. Инкрементального парсера нет, на `didChange` делается полный reparse. Анализатор **никогда не исполняет формы верхнего уровня** документа: `read → macroexpand → typecheck`; единственное выполнение кода — тела макросов. `emit`/`run` для анализируемого файла не вызываются. Библиотека называется `libqualisplsp` (имя `libqualisp` зарезервировано за будущей библиотекой рантайма).
+
+| Компонент | Что это |
+|---|---|
+| `src/lsp_abi.zig` | Zig-библиотека с analysis-only C ABI (`addLibrary`, `link_libc`, rpath `$ORIGIN`) |
+| `tools/qualisp-lsp/` | Rust-сервер, stdio JSON-RPC; зависимости только `libloading`, `serde`, `serde_json`, фрейминг написан вручную |
+| `editors/vscode/` | расширение VSCodium/VS Code на чистом JS, без npm-зависимостей: язык `qualisp`, `*.qlsp`, JSON-RPC, коллекция диагностик, 4 провайдера |
+
+`libloading` ищет библиотеку в порядке `$QUALISP_LIB` → каталог сервера → `../lib/` → системные пути; POSIX — `libqualisplsp.so`, Windows — `qualisplsp.dll`. Параллельные запросы сериализуются Rust-мьютексом: на процесс — один анализатор.
+
+C ABI (`src/lsp_abi.zig`) экспортирует `ql_analyzer_new`/`free`, `ql_analyzer_set_source`/`check`/`diagnostics` (+ `ql_diagnostics_free`), `ql_analyzer_document_symbols` (+ free), `ql_analyzer_definition` (+ `ql_locations_free`), `ql_analyzer_hover` (+ `ql_symbol_info_free`), `ql_analyzer_completion` (+ free), `ql_analyzer_document_highlight` (+ free), `ql_analyzer_semantic_tokens` (+ free), `ql_analyzer_register_stdlib`. Возврат `int`: `0` — ok, `1` — не найдено/диагностики, `-1` — внутренняя ошибка. Все буферы освобождаются парной `ql_*_free` из той же библиотеки, строки — NUL-терминированные копии. Позиции: line 1-based, column/offset — **байты**; перевод UTF-16 ↔ bytes делает Rust.
+
+Что реально работает:
+
+| Запрос | Поведение |
+|---|---|
+| `textDocument/publishDiagnostics` | ошибки reader'а и чекерера, включая старый позиционный вид аннотаций с позицией |
+| `textDocument/definition` | `defun`/`defvar`/`defstruct`/`deftrait`; поиск по `.qlsp` воркспейса и встроенным stdlib-модулям (`qualisp/registerDocuments`, `ql_analyzer_register_stdlib`) |
+| `textDocument/hover` | статический тип + исходная форма определения и комментарий над ней (докстрингов в языке нет) |
+| `textDocument/documentSymbol` | outline верхнего уровня |
+| `textDocument/completion` | примитивы, экспорты stdlib, локальные биндинги |
+| `textDocument/documentHighlight` | все вхождения символа под курсором |
+| `textDocument/semanticTokens/full` | 7 типов: type/function/variable/keyword/string/number/comment; легенда и дельта-кодирование — в Rust |
+| `didChange` | полная пересылка текста |
+
+Проверка: 16 Zig ABI-тестов и 12 Rust-интеграционных тестов над stdio (initialize/capabilities, пустые диагностики, old-syntax diagnostic, didChange, UTF-16-колонки, documentSymbol, definition+hover, completion, documentHighlight, semanticTokens, hover с формой и комментарием, definition из другого файла); мок-тест расширения — `node editors/vscode/test/smoke.js`.
+
+**Честно про поставку.** В ассетах 0.19.16 ровно 6 файлов: два `qualisp`, три `qprof` и `SHA256SUMS.txt`. Готового `qualisp-lsp`, `libqualisplsp.so/.dll` и `.vsix` там **нет**. LSP поставляется в исходниках: чтобы получить сервер и расширение, соберите их локально — `bash tools/lsp/build.sh` (результат — `zig-out/lsp/`), затем `node editors/vscode/test/smoke.js` или `python3 editors/vscode/package-vsix.py` (самодостаточный `zig-out/qualisp.vsix`, ставится `codium --install-extension zig-out/qualisp.vsix --force`, без `vsce` и npm). Пути переопределяются настройками `qualisp.lsp.serverPath` / `qualisp.lsp.libraryPath`. Демо — `examples/lsp-demo.qlsp` (гл. 17.8).
+
+> 🐍 Как `rust-analyzer`: бинарник всегда можно собрать из исходников, но в готовый релиз языка он не обязательно входит. Расширение при этом тонкое, как клиент LSP на чистом JS, а не сам компилятор на TypeScript.

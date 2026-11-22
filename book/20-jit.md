@@ -27,7 +27,8 @@ Program (root)
 ## 20.2 Первый запуск
 
 ```lisp
-(defun add (a :fixnum b :fixnum) :fixnum (+ a b))
+(defun add ((a . :fixnum) (b . :fixnum))
+  ((+ a b) . :fixnum))
 (print (add 2 3))               ;; → 5
 ```
 
@@ -44,7 +45,8 @@ Program (root)
 - страницы функций принадлежат рантайму (`Runtime.adoptPage`), в кэше лежат top-level страницы.
 
 ```lisp
-(defun sq (x :fixnum) :fixnum (* x x))
+(defun sq ((x . :fixnum))
+  ((* x x) . :fixnum))
 (print (sq 7))                  ;; → 49
 ```
 
@@ -92,6 +94,32 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 
 Здесь **нет интерпретатора как fallback**: guard уводит в хелпер, а не в tree-walk; deopt не реализован — страницы не специализированы, helper-путь и есть generic-путь.
 
+### Unboxed fixnum-локальные (M3a)
+
+Слоты кадра получили вид `value | raw_int`: параметры и `let`-биндинги, для которых чекер доказал `:fixnum`, живут в payload-области слота **без тега** (`docs/monomorphization.md §4.7`, `src/jit/emitter.zig`, `src/unboxed_test.zig`). `emitRaw` эмитит арифметику, унарный минус и сравнения прямо над raw-слотами — без tag-guard'ов и bail-блока. На границе значение **боксится**: при передаче в вызов, при возврате и при захвате замыканием. Функции, в теле которых есть `lambda`, raw отключают (`allow_raw = false`), чтобы замыкание не читало слот как `Value`.
+
+```lisp
+(defun sum ((n . :fixnum))
+  ((let ((i 0) (acc 0))
+     (while (< i n)
+       (setq acc (+ acc i))
+       (setq i (+ i 1)))
+     acc) . :fixnum))
+(print (sum 10))                ;; → 45 — проверено бинарём
+```
+
+Замеры A/B, ReleaseFast, 2M итераций (`docs/monomorphization.md §4.7`):
+
+| Сценарий | До | После |
+|---|---|---|
+| `loop1` (один `+`) | 10.22 нс | **3.15 нс** (3.2×) |
+| `local_arith` (два `+`) | 14.94 нс | **4.49 нс** (3.3×) |
+| `arith` (глобалы) | 17.36 нс | 17.59 нс (без изм.) |
+| `calls` (вызов в цикле) | 33.51 нс | 33.1 нс |
+| `fib` | 42 мс | 42.5 мс (call-bound) |
+
+Глобалы и вызовы остаются боксованными: unboxing локальных ускоряет счётчики цикла и аккумуляторы, но не снимает цену вызова (~15 нс) и работу с глобалами. Тесты `src/unboxed_test.zig` (7): цикл с `let`, боксинг при вызове и возврате, вложенные `let`, отключение raw для `lambda`, унарный минус с int64-wrap, сравнение, дающее настоящий bool.
+
 ### SIMD и быстрые пути тензорных ядер
 
 Тензорные операции вызываются из JIT-кода как хелперы/ядра, но сами ядра векторизованы через `@Vector`:
@@ -104,6 +132,14 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 | роутер `ns-if` | таблица «ячейка → ветка», типизированные проходы | graph 154 → 59 мс |
 
 Порядок сведения в редукциях зафиксирован: результат детерминирован, но не совпадает с «слева направо». В графах ветки `ns-if` считают куски по `B/4` строк, поэтому бенчмарк-набор от SIMD почти не двигается.
+
+### Параллельные ядра: `kernel_pool`
+
+Вычислительные ядра (не путать с пулом компиляции HLO) обслуживает отдельный пул `src/kernel_pool.zig` (`SPEC §12.2`, `AGENTS P9p`). Потоки создаются **лениво на первом достаточно большом вызове**: `prepare` лишь запоминает `Io`; число воркеров — `max(1, min(cpu-1, 8))`. Воркеры — чистые вычислительные потоки: `Runtime` у них нет, входные и выходные буферы выделяет вызывающий, каждому достаётся непересекающийся диапазон выхода. Общие `frame.pool`, `grads[]`, `rt.trace` и scope-арены остаются на одном потоке; вложенный параллелизм на воркерах отключён, чтобы не получить дедлок фиксированного пула. Маленькие входы считаются последовательно, а `QUALISP_SERIAL=1` выключает пул полностью.
+
+Параллелятся `elementwise`/`map` (порог ~256K элементов), `matmul` (по строкам результата, обход i-k-j), `reshape`/`transpose` (по строкам), `tsum`/`tmean` (8-полосные partial'ы с фиксированным порядком сведения: chunk'и → полосы → хвост; результат **побайтно** совпадает с последовательным). NS: `fillBand`, выбор ветки, `countingSort` (гистограммы/курсоры по chunk'ам, стабильный порядок), `gatherRows`/`scatterRows`; ошибки `Uncovered`/`Overlap` проверяются после параллельного прохода. Пока последовательны `max`, `softmax`, `argmax`, `reduceToShape` — global-редукция или read-modify-write выхода.
+
+Замеры A/B, ReleaseFast, 16 ядер, min из 11 (`AGENTS P9p`): matmul 15.9 → **7.6 мс (2.10×)**, ns-if eager 84.9 → 79.0 мс, graph 59.9 → 60.4 мс, reduce 5.1 → 5.7 мс, fib без изменений. Остаток одной нити в ns-if — сами branch-лямбды (4 ветки): их параллелизм требует per-worker `Runtime`/пула и будет отдельным шагом. `src/parallel_test.zig` (3 теста) сверяет parallel/serial **побайтно** для `f32`/`f64` elementwise+map+sum+mean, matmul 128×128 и NS route+gather на 65536 строках.
 
 ### Прямые глобалы
 
@@ -118,6 +154,18 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 - `ql_load_global`/`ql_set_global`, `ql_call_global`/`ql_call_value`, `ql_tail_prepare`, `ql_make_closure`, `ql_load_env`/`ql_store_env`, `ql_loop_mark/restore/promote`, `ql_macroexpand`/`ql_eval`, `ql_throw`/`ql_catch`.
 
 Инлайн-пути (§20.3) — лишь короткие операции, где хелпер не нужен: литералы, копия слота (16 + 8 байт), чтение immediate-глобала, promotion в `while`, откат итерации. Всё, что сложнее, остаётся в хелпере — это и есть generic-путь.
+
+### Специализация-lite: измерена и откатана
+
+Пробная специализация — карта типов на узлах чекёра, типовое окружение эмиттера (параметры и `defvar`) и unguarded fixnum-арифметика/сравнения для доказанных типов (`docs/monomorphization.md §4.6`, `AGENTS E10`) — была реализована и замерена A/B в ReleaseFast на 2M итераций:
+
+| Сценарий | До | После |
+|---|---|---|
+| arith-loop | 18.15 нс | 18.26 нс |
+| calls-loop | 33.51 нс | 32.68 нс |
+| `fib` | 42 мс | 43 мс |
+
+Вывод документа: tag-guard'ы не являются бутылочным горлышком; время уходит на 24-байтные `Value`-загрузки/сохранения, `setq` и механизм вызова. Код специализации откатан; дизайн и замеры остались в `docs/monomorphization.md`. JIT на данный момент мономорфным не является. Реальный выигрыш дала только смена представления значений — unboxing локальных (§20.3), а не снятие guard'ов.
 
 ### Вызовы и хелперы
 
@@ -140,7 +188,7 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 
 ## 20.6 Интроспекция и диагностика
 
-Языковых форм учёта JIT нет: `(jit-stats)`, `(mem-report)`, `(prof)`, `(version)` в бинарнике дают `unknown function` (проверено REPL-пробой). Наблюдать поведение можно только через trace (§20.10) и сообщения об ошибках.
+Языковых форм учёта JIT нет: `(jit-stats)`, `(mem-report)`, `(version)`, `(help)`, `(env)`, `(gc)` в бинарнике дают `unknown function` (проверено REPL-пробой 0.19.16). Наблюдать поведение можно только через trace (§20.10) и сообщения об ошибках; формы сохранения образов (`save-image`/`load-image`, гл. 21) существуют, но JIT-статистики не дают.
 
 | Механизм | Что даёт |
 |---|---|
@@ -151,7 +199,7 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 
 ### Что недоступно из языка
 
-Проверка в REPL фиксирует: `mem-report`, `jit-stats`, `prof`, `version`, `help`, `environment` — `unknown function`. Счётчиков `compiles`/`cache-hits`/`refusals` как алисты нет; точный учёт заменяет trace. Компиляция — не условие корректности: функция без страницы ведёт себя так же, как с ней.
+Проверка в REPL фиксирует: `mem-report`, `jit-stats`, `version`, `help`, `env`, `gc` — `unknown function`. Счётчиков `compiles`/`cache-hits`/`refusals` как алисты нет; точный учёт заменяет trace. Компиляция — не условие корректности: функция без страницы ведёт себя так же, как с ней.
 
 ### Source map: `file:line:col`
 
@@ -161,12 +209,12 @@ void entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value);
 
 ```text
 $ cat err.qlsp
-(defun foo (x :flonum) :flonum
-  (/ 1.0 x))
+(defun foo ((x . :flonum))
+  ((/ 1.0 x) . :flonum))
 (print (foo 0.0))
 $ qualisp err.qlsp
 nil
-err.qlsp:2:3: division by zero
+err.qlsp:2:4: division by zero
 error: RuntimeError
 ```
 
@@ -174,7 +222,7 @@ error: RuntimeError
 
 ## 20.7 Guard'ы и ошибки
 
-Промах guard'а ставит `RuntimeError` через `Runtime.bailAt` — единственный путь ошибки с позицией. Деоптимизации нет: helper-путь и есть generic-путь, страницы не специализированы, поэтому «шторма bail» и пересборки по сигнатуре не бывает. Ошибки не разматываются через нативный C-стек — только через JIT-кадры; `catch-error` ловит ошибку и чистит `Runtime.error_message`. Исключения не должны пересекать нативный кадр.
+Для боксованных `Value` промах guard'а ставит `RuntimeError` через `Runtime.bailAt` — единственный путь ошибки с позицией. В raw-слотах (§20.3) tag-guard'ов нет: тип доказан чекером; боксинг и guard'ы остаются **на границе** — при вызове, возврате и захвате замыканием. Деоптимизации нет: helper-путь и есть generic-путь, страницы не специализированы, поэтому «шторма bail» и пересборки по сигнатуре не бывает. Ошибки не разматываются через нативный C-стек — только через JIT-кадры; `catch-error` ловит ошибку и чистит `Runtime.error_message`. Исключения не должны пересекать нативный кадр.
 
 ## 20.8 Граница статики: `eval`
 
@@ -197,8 +245,8 @@ entry(frame: *Value, env: ?*Env, rt: *Runtime, out: *Value) void
 `tail_self` не зовёт хелпер. Эмиттер ставит `tail_head` сразу после пролога (параметры уже в своих слотах). Аргументы хвостового вызова сначала вычисляются в **временные слоты**, затем копируются в слоты параметров — поэтому `(f b a)` безопасен — и следует `jmp tail_head`. Кадр, traceback и `out` сохраняются, память кадра не растёт. Условие: тот же кал по имени, точная арность, без `&optional`/`&rest`. Тест на структуру кода проверяет, что хвостовая страница не зовёт `ql_call_global`.
 
 ```lisp
-(defun tc-sum (n :fixnum acc :fixnum) :fixnum
-  (if (= n 0) acc (tc-sum (- n 1) (+ acc n))))
+(defun tc-sum ((n . :fixnum) (acc . :fixnum))
+  ((if (= n 0) acc (tc-sum (- n 1) (+ acc n))) . :fixnum))
 (print (tc-sum 1000000 0))      ;; → 500000500000 — миллион хвостовых вызовов
 ```
 
@@ -220,8 +268,10 @@ ql_tail_prepare(frame, name, first, argc, capacity) → ?*TailTarget
 Предпроход чекера публикует сигнатуры top-level `defun` до проверки программы, поэтому `even-p`/`odd-p` типизируются; вызов до определения — runtime-ошибка.
 
 ```lisp
-(defun even-p (n :fixnum) :bool (if (= n 0) t (odd-p (- n 1))))
-(defun odd-p  (n :fixnum) :bool (if (= n 0) nil (even-p (- n 1))))
+(defun even-p ((n . :fixnum))
+  ((if (= n 0) t (odd-p (- n 1))) . :bool))
+(defun odd-p ((n . :fixnum))
+  ((if (= n 0) nil (even-p (- n 1))) . :bool))
 (print (even-p 1000000))        ;; → T — миллион взаимных хвостовых вызовов
 ```
 
@@ -248,17 +298,26 @@ qprof trace.json --top 10
 
 Пишется Chrome Trace JSON: события `B`/`E`, микросекунды, `pid=1,tid=1`. Трасса пишется и при ошибке (`defer` в `main`). Инструментированы только точки, невидимые из AST: границы вызовов функций, вызов HLO-графа, фаза `ns-if`. Когда трасса не запрошена, каждый хук — одна проверка `active`. Компиляция JIT-страницы входит в inclusive-время первого вызова: отдельного события «компиляция» нет, поэтому первый вызов всегда дороже.
 
-Агрегатор `tools/qprof` (на Rust; в снапшоте — готовый бинарник) печатает число вызовов и self/inclusive время. Проверено бинарём:
+Агрегатор `tools/qprof` (на Rust; в снапшоте — готовый бинарник) печатает число вызовов и self/inclusive время. Проверено бинарём 0.19.16 на минимальном скрипте:
+
+```lisp
+;; trace.qlsp
+(defun sq ((x . :fixnum))
+  ((* x x) . :fixnum))
+(print (sq 7))
+```
 
 ```text
-$ qualisp --trace fib.json fib.qlsp
-6765
-$ qprof fib.json --top 5
-trace: fib.json (43782 events)
+$ qualisp --trace tr.json trace.qlsp
+49
+$ cat tr.json
+{"displayTimeUnit":"us","traceEvents":[{"name":"SQ","ph":"B","ts":1868,"pid":1,"tid":1},{"ph":"E","ts":1871,"pid":1,"tid":1}]}
+$ qprof tr.json --top 5
+trace: tr.json (2 events)
 name                          calls       total_us        self_us   self%
-FIB                           21891      726467.0        53923.0  100.0%
+SQ                                1            3.0            3.0  100.0%
 
-total self time: 53923.0 us
+total self time: 3.0 us
 ```
 
 `qprof` без аргументов → `usage: qprof <trace.json> [--top N]` (exit 2); `qprof --help` трактует флаг как имя файла.
@@ -268,7 +327,9 @@ total self time: 53923.0 us
 ## 20.11 Ограничения и что дальше
 
 - Стенсилы и ABI хардкодят **x86-64 SysV**; других архитектур и бэкендов нет. На Windows байты страницы те же, отличаются только `VirtualAlloc`/`VirtualProtect`.
-- Deopt не реализован: страницы не специализированы, guard ставит `RuntimeError`, generic-путь — хелперы. Deopt появится вместе со специализацией.
+- Deopt не реализован: страницы не специализированы (специализация-lite измерена и откатана, §20.4), guard ставит `RuntimeError`, generic-путь — хелперы. Deopt появится вместе со специализацией.
+- Unboxed только для `:fixnum`-локальных (§20.3): параметры и `let`-биндинги боксируются на границе, глобалы и вызовы остаются боксованными. Дальше — raw для `:flonum`, raw-глобалы в `while` (P9-стиль), затем M2 (специализированные страницы) поверх raw-слотов.
+- Параллельные ядра идут через `kernel_pool` (§20.3): воркеры без `Runtime`, непересекающиеся диапазоны выхода, `QUALISP_SERIAL=1`; `max`/`softmax`/`argmax`/`reduceToShape` пока последовательны.
 - Нет регистрового аллокатора: значения идут через слоты памяти (16 + 8 байт на `Value`).
 - Struct-инстансы и `Result` живут до `Runtime.deinit`; per-call освобождения нет.
 - Ошибки не разматываются через нативный C-стек, только через JIT-кадры; исключение не должно пересекать нативный кадр (у страниц нет `.pdata`).
@@ -276,4 +337,4 @@ total self time: 53923.0 us
 - `JitCache.clear()` снимает кэш, но страницы живут до teardown; `load-image` пересобирает JIT из мастер-форм (гл. 21).
 - Замеры ReleaseFast (`CHANGELOG.md`): fib 42 мс, matmul 16 мс, reduce 6 мс, ns-if graph 58 мс (эталон — Rust `-O3`). Относительные улучшения по этапам P9: fib(30) −11 %, loop-id −9 %, взаимная рекурсия с разными кадрами −8 %, вызов ~1 нс дороже после учёта кадра; 1M хвостовых вызовов в постоянном числе кадров.
 
-Тесты: `src/jit_test.zig` (170 тестов) — эмиттер, ABI, source map, кэш, TCO и бэктрейсы; `src/runtime_test.zig` — арена кадров, непересечение/переиспользование, типизированное исчерпание; `src/profile_test.zig` — трассировка; бенчмарки — `bench/fib.qlsp`, `bench/matmul.qlsp`, `bench/reduce.qlsp`, `bench/nsif_*.qlsp`.
+Тесты: `src/jit_test.zig` (170 тестов) — эмиттер, ABI, source map, кэш, TCO и бэктрейсы; `src/unboxed_test.zig` (7) — raw-слоты и боксинг на границе; `src/parallel_test.zig` (3) — побайтовый паритет parallel/serial; `src/runtime_test.zig` — арена кадров, непересечение/переиспользование, типизированное исчерпание; `src/profile_test.zig` — трассировка; бенчмарки — `bench/fib.qlsp`, `bench/matmul.qlsp`, `bench/reduce.qlsp`, `bench/nsif_*.qlsp`.

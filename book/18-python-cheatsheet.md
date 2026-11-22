@@ -1,6 +1,6 @@
 # Глава 18. Шпаргалка: Qualisp ↔ Python
 
-Быстрый перевод между Qualisp и Python-стеком (NumPy / PyTorch / scikit-learn) применительно к релизу 0.19.15 (реализация на Zig). Имена примитивов в Qualisp интернируются в верхний регистр (`MATMUL`, `TSET!`, `PARAM`, `GRAD!`, `NS-IF`); писать их можно в любом регистре. Типы обязательны: `defun`/`lambda` требуют аннотаций параметров и возврата, `defvar` — типа. Ламбда-литерал не вызывается напрямую — только через `funcall`.
+Быстрый перевод между Qualisp и Python-стеком (NumPy / PyTorch / scikit-learn) применительно к релизу 0.19.16 (реализация на Zig). Имена примитивов в Qualisp интернируются в верхний регистр (`MATMUL`, `TSET!`, `PARAM`, `GRAD!`, `NS-IF`); писать их можно в любом регистре. Типы обязательны: параметры `defun`/`lambda`/`defgraph`/`defuse` пишутся парой `(имя . :тип)`, результат `defun`/`defgraph`/`defuse` — последней формой тела `(expr . :ret)`; у `lambda` результат выводится. `defvar` имеет вид `(name (value . :type))`. Ламбда-литерал не вызывается напрямую — только через `funcall`.
 
 ## 18.0 Гомоиконность
 
@@ -12,25 +12,40 @@
 | `(quote x)` / `'x` | данные, а не вызов; `` `(f ,x) `` — квазиквота |
 | `(macroexpand-1 form)` / `(macroexpand form)` / `(macroexpand-all form)` | раскрытие макросов до проверки типов; `macroexpand-all` — рекурсивно, не заходя в `quote` |
 | `(gensym "fd")` | свежее имя для гигиены макроса (`G-0`, `G-1`, …) |
-| `(defgraph linear (x (:tensor :f32 (2 3))) (:tensor :f32 (2 3)) body)` | мастер-граф как форма: близко к `torch.fx.GraphModule`, но исходник — S-выражение |
-| `(defuse affine (x (:tensor :f32 (4)) a :flonum b :flonum) (:tensor :f32 (4)) body)` | `@torch.compile` над одним elementwise-выражением: один цикл без промежуточных тензоров |
+| `(defgraph loss ((c . (:tensor :f32 (1))) (x . (:tensor :f32 (4))) (y . (:tensor :f32 (4)))) ((term '(tmean (* (- (* c (* x x)) y) (- (* c (* x x)) y))) '(c x y)) . :flonum))` | мастер-граф как форма: близко к `torch.fx.GraphModule`, но исходник — S-выражение |
+| `(defuse affine ((x . (:tensor :f32 (4))) (a . :flonum) (b . :flonum)) ((relu (+ (* x a) b)) . (:tensor :f32 (4))))` | `@torch.compile` над одним elementwise-выражением: один цикл без промежуточных тензоров |
 | `(save-image "w.qimg")` / `(load-image "w.qimg")` | `pickle` + `torch.save` в одном файле QSRD (гл. 21) |
 | `(save-weights "w.qsrd")` / `(load-weights "w.qsrd")` | `torch.save(model.state_dict())` / `load_state_dict` |
 | `(import ml)` / `(import-from ml (mean mse))` | `import ml` / `from ml import mean, mse` |
-| `(defvar w (:tensor :f32 (2)) (param (tensor (1.0 2.0))))` | `w = torch.tensor([1., 2.], requires_grad=True)` |
+| `(defvar w ((param (tensor (1.0 2.0))) . (:tensor :f32 (2))))` | `w = torch.tensor([1., 2.], requires_grad=True)` |
 | `qualisp --trace tr.json script.qlsp` + `qprof tr.json` | `cProfile` + `pstats` — внешний инструмент, не форма языка |
 
 > 🐍 В Qualisp нет отдельного AST: код и данные — одни и те же cons-ячейки. `:syntax` — не `:any`, а полноценный тип: с ним работают `car`/`cdr`/`cons`/`equal`/печать/`eval`.
 
 ## 18.1 Базовый синтаксис
 
+**Аннотации: DO / POST.** Dotted pair — данные: cdr пары — это тип, поэтому аннотация не может быть принята за вызов. Позиционный вид не принимается ни ридером, ни чекером, режима совместимости нет.
+
+| DO (не принимается) | POST (рабочая форма) |
+|---|---|
+| `(defun sq (x :fixnum) :fixnum (* x x))` | `(defun sq ((x . :fixnum)) ((* x x) . :fixnum))` |
+| `(lambda (x :fixnum) :fixnum (+ x 1))` | `(lambda ((x . :fixnum)) (+ x 1))` — результат выводится |
+| `(defvar y :fixnum 20)` | `(defvar y (20 . :fixnum))` |
+| `(defvar w (:tensor :f32 (2)) (param …))` | `(defvar w ((param …) . (:tensor :f32 (2))))` |
+| `(defstruct pt ((x :fixnum) (y :fixnum)))` | `(defstruct pt ((x . :fixnum) (y . :fixnum)))` |
+| `(deftrait d (show (self :self) :string))` | `(deftrait d (show ((self . :self)) . :string))` |
+| `(impl box (defun show (self) :string …))` | `(impl box (defun show (self) ((…) . :string)))` |
+| `(defgraph g (x (:tensor :f32 (4))) :flonum body)` | `(defgraph g ((x . (:tensor :f32 (4)))) ((tmean (* x x)) . :flonum))` |
+
+DO даёт точные диагностики: `defun expects parameters, a result and a body`, `defvar expects a name, a typed value and nothing else`, `field must be (name . :type)`, `trait method expects a name, parameters and a result`. Исключение — `defmacro`: он по-прежнему пишется позиционно, `(defmacro name (form :syntax) :syntax …)`.
+
 | Qualisp | Python |
 |---|---|
 | `(+ 1 2)` | `1 + 2` |
 | `(f x y)` | `f(x, y)` |
-| `(defun sq (x :fixnum) :fixnum (* x x))` | `def sq(x: int) -> int: return x * x` |
-| `(\ (x :fixnum) :fixnum (* x x))` | `lambda x: x * x` — `\` — сахар для `lambda` |
-| `(defvar y :fixnum 20)` | `y: int = 20` — тип фиксируется |
+| `(defun sq ((x . :fixnum)) ((* x x) . :fixnum))` | `def sq(x: int) -> int: return x * x` |
+| `(\ ((x . :fixnum)) (* x x))` | `lambda x: x * x` — `\` — сахар для `lambda`; результат выводится |
+| `(defvar y (20 . :fixnum))` | `y: int = 20` — тип фиксируется |
 | `(setq y 21)` | `y = 21` — только значение того же типа |
 | `(let ((a 1) (b 2)) (+ a b))` | `a, b = 1, 2` — **параллельные** биндинги; `let*` отсутствует |
 | `(if (null x) a b)` | `a if x is None else b` — `if` принимает только `:bool`; `(if x …)` — ошибка |
@@ -49,19 +64,20 @@
 
 Числа: `42`, `-7`, `3.14`, `1e3` → `1000.0`; `/` всегда даёт float (`(/ 7 2)` → `3.5`). `0xFF` и `1/2` числами не являются. `sqrt` есть; `abs`, `min`, `max`, `expt` — нет. `nil` — false, «None» и пустой список одновременно; других ложных значений нет, `0` истинен. `t` и `nil` — булевы константы.
 
-Проверка типов — статическая: `(defun sq (x :fixnum) :fixnum (* x x))` печатает `SQ`, `(sq 7)` → `49`. Несовпадение типа — отказ с позицией `error at 1:1: …`, а не runtime-значение.
+Проверка типов — статическая: `(defun sq ((x . :fixnum)) ((* x x) . :fixnum))` печатает `SQ`, `(sq 7)` → `49`. Несовпадение типа — отказ с позицией `error at 1:1: …`, а не runtime-значение.
 
 ### 18.1.1 Структуры, методы и трейты
 
 | Qualisp | Python |
 |---|---|
-| `(defstruct pt ((x :fixnum) (y :fixnum)))` | `@dataclass` с аннотированными полями |
+| `(defstruct pt ((x . :fixnum) (y . :fixnum)))` | `@dataclass` с аннотированными полями |
+| `(defvar p ((pt 1 2) . (:struct pt)))` | `p: pt = pt(1, 2)` — тип значения фиксируется |
 | `(pt 1 2)` | `pt(1, 2)` — конструктор-функция |
 | `(slot-value p 'x)` / `(set-slot p 'x 10)` | `p.x` / `p.x = v` — статический доступ; неизвестное поле — ошибка компиляции |
 | `(type-of p)` → `STRUCT` | `type(p).__name__` |
-| `(deftrait display (show (self :self) :string))` | `typing.Protocol` — набор сигнатур без тел |
-| `(defstruct box ((v :fixnum)) (display))` | класс, объявляющий реализацию протокола |
-| `(impl box (defun show (self) :string …))` | `def show(self) -> str: …` в теле класса |
+| `(deftrait display (show ((self . :self)) . :string))` | `typing.Protocol` — набор сигнатур без тел |
+| `(defstruct box ((v . :fixnum)) (display))` | класс, объявляющий реализацию протокола |
+| `(impl box (defun show (self) ((number-to-string (slot-value self 'v)) . :string)))` | `def show(self) -> str: …` в теле класса |
 | `(show obj)` | `obj.show()` — диспетч статически по типу первого аргумента, без vtable |
 
 Структура — **атом** с тегом и типизированными слотами, а не S-выражение; гомоиконность относится к коду. Трейт — не значение. Метод можно объявить и через `impl` без трейта.
@@ -76,9 +92,9 @@
 | `(length xs)` | `len(xs)` |
 | `(null xs)` | `xs is None` — `null : :a → :bool` |
 | `(list 1 2 3)` | `[1, 2, 3]` |
-| `(map (lambda (x :fixnum) :fixnum (* x x)) xs)` | `list(map(lambda x: x*x, xs))` |
-| `(filter (lambda (x :fixnum) :bool (> x 1)) xs)` | `list(filter(..., xs))` |
-| `(reduce (lambda (a :fixnum b :fixnum) :fixnum (+ a b)) xs 0)` | `functools.reduce(lambda a, b: a+b, xs, 0)` |
+| `(map (lambda ((x . :fixnum)) (* x x)) xs)` | `list(map(lambda x: x*x, xs))` |
+| `(filter (lambda ((x . :fixnum)) (> x 1)) xs)` | `list(filter(..., xs))` |
+| `(reduce (lambda ((a . :fixnum) (b . :fixnum)) (+ a b)) xs 0)` | `functools.reduce(lambda a, b: a+b, xs, 0)` |
 | `(append xs ys)` / `(reverse xs)` | `xs + ys` / `xs[::-1]` |
 
 `reduce` принимает `(элемент аккумулятор)`; без init первым аккумулятором становится первый элемент. `and`/`or` — не функции-значения, а спецформы; `(apply and xs)` не работает.
@@ -115,6 +131,8 @@
 | `(tsum t)` / `(tmean t)` / `(tmax t)` | `t.sum()` / `t.mean()` / `t.max()` — оси нет, свёртка в скаляр |
 | `(argmax t)` | `t.argmax()` — только 1-D |
 | `(relu t)` / `(exp t)` / `(log t)` / `(tanh t)` | `np.maximum(t, 0)` / `np.exp(t)` / … — elementwise |
+| `(sin t)` / `(cos t)` / `(sqrt t)` / `(atan t)` | `np.sin(t)` / `np.cos(t)` / `np.sqrt(t)` / `np.arctan(t)` — elementwise; forward и backward есть и в графе |
+| `(ones-like t)` / `(tmax-mask t)` / `(relu-mask t)` / `(reshape-like t like)` | `np.ones_like(t)` / one-hot по максимуму / `np.maximum(t, 0) > 0` / `np.reshape(t, like.shape)` — forward-only блоки символьного градиента |
 | `(softmax t)` | `scipy.special.softmax(t)` — только 1-D |
 | `(tref t i j)` | `t[i, j]` — индексы `:fixnum`, их число равно рангу |
 | `(tset! t i j v)` | `t[i, j] = v` — мутация на месте, возвращает тот же тензор |
@@ -130,7 +148,7 @@
 Выборки всегда материализуются: `reshape`, `transpose`, `t-rows`, `t-select-rows`, `t-column` возвращают **новый** тензор, алиасов над буфером и записи через них нет. `t-slice` в API отсутствует. Изменить элемент можно только через `tset!` на исходном тензоре.
 
 ```lisp
-(defvar m (:tensor :f32 (2 2)) (tensor ((1.0 2.0) (3.0 4.0))))
+(defvar m ((tensor ((1.0 2.0) (3.0 4.0))) . (:tensor :f32 (2 2))))
 (print (tref m 1 0))          ;; 3.0
 (tset! m 1 0 9.0)
 (print (tref m 1 0))          ;; 9.0
@@ -144,12 +162,13 @@
 
 | Qualisp | PyTorch |
 |---|---|
-| `(defvar w (:tensor :f32 (2)) (param (tensor (1.0 2.0))))` | `w = torch.tensor([1., 2.], requires_grad=True)` |
-| `(defgraph loss (x (:tensor :f32 (2))) :flonum (tmean (* x x)))` | `def loss(x): return (x*x).mean()` — граф трассируется один раз |
+| `(defvar w ((param (tensor (1.0 2.0))) . (:tensor :f32 (2))))` | `w = torch.tensor([1., 2.], requires_grad=True)` |
+| `(defgraph loss ((x . (:tensor :f32 (2)))) ((tmean (* x x)) . :flonum))` | `def loss(x): return (x*x).mean()` — граф трассируется один раз |
 | `(grad! (loss w))` | `loss(w).backward()` |
 | `(grad-of w)` | `w.grad` — stable-градиент той же формы/dtype; для невычисленного параметра — нули |
 | `(tset! w 0 (- (tref w 0) (* lr (tref (grad-of w) 0))))` | `w.data[0] -= lr * w.grad[0]` — in-place обновление |
-| `(relu t)` / `(tanh t)` / `(exp t)` в теле графа | `F.relu` / `torch.tanh` / `torch.exp` — узлы backward есть |
+| `(relu t)` / `(tanh t)` / `(exp t)` / `(sin t)` / `(cos t)` / `(sqrt t)` / `(atan t)` в теле графа | `F.relu` / `torch.tanh` / `torch.exp` / `torch.sin` / … — узлы backward есть |
+| `(grad '(tsum x) 'x)` (модуль `symbolic`) | reverse-mode по скалярному лоссу: `torch.autograd.grad` над `(tsum term)`; в отличие от `diff`, результатом остаются тензорные формы (`ones-like`, `tmax-mask`, `relu-mask`, `reshape-like`) |
 | `(linear-forward x w b)` | `torch.nn.functional.linear(x, w, b)` |
 | `(mlp-forward x w1 b1 w2 b2)` | `nn.Sequential(nn.Linear(...), nn.ReLU(), nn.Linear(...))` |
 | `(mse-loss pred y)` | `F.mse_loss(pred, y)` — скаляр |
@@ -162,11 +181,22 @@
 `defgraph` — master-форма. Тело исполняется один раз в trace-режиме на нулевых placeholder-тензорах; управление статическое, `tref`/`tset!` в графе не поддерживаются. Вызов компилируется в запуск графа; `grad!` сеет единицы формы выхода и идёт по узлам с конца, читая forward-активации из per-run `TensorBufferPool` — **без replay**, за O(n). Градиенты накапливаются в scratch, для `param`-входов копируются в stable и кладутся в `grad`.
 
 ```lisp
-(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
-(defgraph sq (x (:tensor :f32 (2 2))) :flonum (tmean (* x x)))
+(defvar w ((param (tensor ((1.0 2.0) (3.0 4.0)))) . (:tensor :f32 (2 2))))
+(defgraph sq ((x . (:tensor :f32 (2 2)))) ((tmean (* x x)) . :flonum))
 (print (sq w))                    ;; 7.5
 (grad! (sq w))
 (print (tref (grad-of w) 0 0))    ;; 0.5
+```
+
+Символьный reverse-mode считается отдельно от `grad!`:
+
+```lisp
+(import symbolic)
+(print (grad '(tsum x) 'x))                       ;; (ONES-LIKE X)
+(print (grad '(tmax x) 'x))                       ;; (TMAX-MASK X)
+(print (grad '(tsum (relu x)) 'x))                ;; (* (ONES-LIKE (RELU X)) (RELU-MASK X))
+(print (grad '(tsum (matmul x y)) 'x))            ;; (MATMUL (ONES-LIKE (MATMUL X Y)) (TRANSPOSE Y))
+(print (diff '(sin x) 'x))                        ;; (COS X)
 ```
 
 > ⚠️ `grad!` работает только с **последним запуском графа в текущей top-level форме** и не проверяет, что аргумент — именно его выход. Отдельного `tape-form`, `grad-accum!`, `zero-grad!`, `clip-grad!`, `sigmoid!` и `!`-суффиксов операций нет. Полный обучающий цикл — в `examples/xor.qlsp`: `grad!` → `tset!` по `grad-of` → следующая итерация.
@@ -182,7 +212,7 @@
 | `(adam-init w)` / `(adam-step st grad lr)` / `(adam-param st)` / `(adam-steps st)` | `torch.optim.Adam` + `state_dict` |
 | `(momentum-init w)` / `(momentum-step st grad lr momentum)` / `(momentum-param st)` | SGD с momentum |
 | `(linear-grads x y w b)` / `(linear-regression-step x y w b lr)` | замкнутая форма градиента линейной регрессии — без графа |
-| `(defgraph net (x …) … (relu (+ (matmul x w) b)))` | `nn.Module.forward` как S-выражение |
+| `(defgraph net ((x . (:tensor :f32 (2 4))) (w . (:tensor :f32 (4 2))) (b . (:tensor :f32 (1 2)))) ((relu (+ (matmul x w) b)) . (:tensor :f32 (2 2))))` | `nn.Module.forward` как S-выражение |
 
 Bias — строка `(1 m)`, broadcast `(n m) + (1 m)` даёт per-column bias. Все функции `dl` чистые, работают только с `:f32` и 2-D `batch × features`; результат шага имеет wildcard-форму `(_ _)` и не присваивается переменной с конкретной формой. Слои `batchnorm`/`dropout`/`attention`/`conv2d`/`maxpool` как готовые API отсутствуют — они выражаются композицией `defgraph`/`defuse`/`neuro`.
 
@@ -228,27 +258,30 @@ Bias — строка `(1 m)`, broadcast `(n m) + (1 m)` даёт per-column bia
 |---|---|
 | `(match pattern term)` → `(:option :syntax)` | сопоставление с образцом: `match pattern:` / `unification` |
 | `(subst var value term)` / `(rewrite term)` / `(rewrite-all term)` | замена и переписывание до неподвижной точки |
-| `(simplify term)` / `(diff term var)` | упрощение (`x+0`, `x*1`, `x*0`) и аналитическая производная |
+| `(simplify term)` / `(diff term var)` | упрощение (`x+0`, `x*1`, `x*0`) и аналитическая производная; `diff` знает унарные `sin/cos/exp/log/sqrt/tanh/atan` и n-арные `+`/`*`/`-` |
+| `(grad term var)` | reverse-mode: градиент скалярного лосса `(tsum term)`, в отличие от поэлементного `diff`; аналог `torch.autograd.grad` над `(tsum term)` |
 | `(unify a b env)` | `unification.unify` — с occurs-check; пустое окружение — `t` |
 | `(collect term var)` / `(diff-canonical term var)` | нормальная форма «сумма мономов»; `d(x*x)/dx` → `(* 2 x)` |
 | `(poly? term var)` / `(poly-coeffs term var)` / `(poly-eval term var x)` | `sympy.Poly` / coeffs / eval |
-| `(term '(tmean (* (- yhat y) (- yhat y))) '(yhat y))` | символьный терм → тензорный код (`neuro`) |
+| `(ones-like x)` / `(tmax-mask x)` / `(relu-mask x)` / `(reshape-like a b)` | `np.ones_like` / one-hot максимума / маска ReLU / форма как у `b` — операторы, в которых `grad` сохраняет форму |
+| `(term '(tmean (* (- yhat y) (- yhat y))) '(yhat y))` | символьный терм → тензорный код (`neuro`); транслирует также `sin/cos/sqrt/atan`, `reshape`, `reshape-like`, `ones-like`, `tmax-mask`, `relu-mask`, `softmax` |
 | `(term->code term vars)` | то же над значением `:syntax`; `term-problem` возвращает первую ошибку, не бросая |
+| `(term->code '(^ (+ x 1) 3) '(x))` | `(LET ((POW-0 (+ X 1))) (* POW-0 POW-0 POW-0))` — составное основание связывается один раз |
 | `(ns-if (:payload x) ((ns-grt score 0) branch-a) (else branch-b))` | жёсткая per-sample маршрутизация — аналога нет (похоже на mixture-of-experts без blending) |
 | `(ns-grt a b)` / `(ns-lss a b)` / `(ns-and p q)` / `(ns-or p q)` / `(ns-not p)` / `(ns-eq a b d)` | непрерывные level-функции: знак = истинность, значение — `:flonum`-данные |
-| `(ns-band …)` | — в API 0.19.15 отсутствует |
+| `(ns-band …)` | — в API 0.19.16 отсутствует |
 
-`term` — макрос из `neuro`: оба аргумента должны быть литералами; переменные обязаны быть перечислены в `vars`, глобал в графе — константа без градиента. Один и тот же терм годится для eager-функции, обучаемого графа и ветки `ns-if`. `diff` упрощает, но **не приводит подобные**: `(diff '(* x x) 'x)` → `(+ X X)`, тогда как `diff-canonical` → `(* 2 X)`.
+`term` — макрос из `neuro` (исключение из парной записи: `(defmacro term (form :syntax vars :syntax) :syntax …)`): оба аргумента должны быть литералами; переменные обязаны быть перечислены в `vars`, глобал в графе — константа без градиента. Один и тот же терм годится для eager-функции, обучаемого графа и ветки `ns-if`. `diff` упрощает, но **не приводит подобные**: `(diff '(* x x) 'x)` → `(+ X X)`, тогда как `diff-canonical` → `(* 2 X)`. `diff` отказывает на `relu` (`diff: relu is not differentiable symbolically`) и `matmul` (`diff: not elementwise; use grad`) — там используется `(grad term var)`.
 
 `ns-if` — per-sample hard-роутер `[B, K]`: `(:payload e)` обязательна, `(:eps e)` опциональна; guard-клауз ≥ 2, ровно одна `(else body)` — boundary-ветка, а не default. Тело ветви — функция одного аргумента над компактифицированными строками. Покрытие проверяется через ROBDD: непокрытие, пересечение и пустая ветка — ошибки компиляции. Градиент идёт только по исполненной ветке; градиента по решению роутера нет.
 
 ```lisp
-(defvar a0 (:tensor :f32 (4)) (tensor (1.0 -1.0 -1.0 -1.0)))
-(defvar x  (:tensor :f32 (4 2)) (tensor ((1.0 2.0) (3.0 4.0) (5.0 6.0) (7.0 8.0))))
+(defvar a0 ((tensor (1.0 -1.0 -1.0 -1.0)) . (:tensor :f32 (4))))
+(defvar x  ((tensor ((1.0 2.0) (3.0 4.0) (5.0 6.0) (7.0 8.0))) . (:tensor :f32 (4 2))))
 (ns-if (:payload x)
-  ((ns-grt a0 0) (lambda (v (:tensor :f32 (4 2))) (* v 2.0)))
-  ((ns-lss a0 0) (lambda (v (:tensor :f32 (4 2))) (* v 3.0)))
-  (else          (lambda (v (:tensor :f32 (4 2))) (* v 11.0))))
+  ((ns-grt a0 0) (lambda ((v . (:tensor :f32 (4 2)))) (* v 2.0)))
+  ((ns-lss a0 0) (lambda ((v . (:tensor :f32 (4 2)))) (* v 3.0)))
+  (else          (lambda ((v . (:tensor :f32 (4 2)))) (* v 11.0))))
 ```
 
 ## 18.8 Строки, файлы, прочее
@@ -267,6 +300,29 @@ Bias — строка `(1 m)`, broadcast `(n m) + (1 m)` даёт per-column bia
 | `(to-fixnum s)` / `(to-flonum s)` / `(to-string x)` → `(:option T)` | `int(s)` / `float(s)` / `str(x)` — `or-else` для распаковки |
 | `(or-else (to-fixnum s) 0)` | `int(s) if ... else 0` — санкционированный способ распаковать option |
 
+### Дата и время (модуль `datetime`)
+
+| Qualisp | Python |
+|---|---|
+| `(now)` / `(now-ms)` / `(monotonic-ns)` | `int(time.time())` / `time.time_ns() // 10**6` / `time.monotonic_ns()` — epoch UTC, `:fixnum` |
+| `(sleep-ms n)` | `time.sleep(n / 1000)` — `:fixnum → :nil` |
+| `(epoch->utc 0)` / `(utc->epoch (epoch->utc 0))` | `datetime.fromtimestamp(0, tz=timezone.utc)` / `.timestamp()` — структура `year month day hour minute second` |
+| `(iso-utc 0)` / `(iso-utc-date 0)` | `dt.isoformat()` → `1970-01-01T00:00:00Z` / первые 10 символов |
+| `(parse-iso-utc "1970-01-01T00:00:00Z")` | `datetime.fromisoformat(...)` — принимает и дату без времени |
+| `(seconds->hms 3661)` | `(1, 1, 1)` — часы, минуты, секунды |
+| `(timer-start)` / `(timer-elapsed-ms t0)` / `(elapsed-ms t0 t1)` | `time.monotonic_ns()` / разница до текущего момента / разница двух замеров, мс |
+| `(elapsed form)` | макрос: печатает `elapsed: … ms` и возвращает значение `form` |
+
+`epoch->utc`/`utc->epoch` используют алгоритм Хиннанта (`div-floor`), даты до 1970 работают. Ошибки парсинга — `throw` с текстами `datetime: timestamp is too short`, `datetime: expected YYYY-MM-DD`, `datetime: expected T after the date`, `datetime: invalid integer in timestamp`. Дробное деление даёт flonum, поэтому целое деление идёт через `to-fixnum`/поправку; `or-else` — функция без короткозамыкания, поэтому `(or-else v (throw …))` всегда бросает — используют `if` + `null`. Локальное время и таймзоны в API отсутствуют; `elapsed` — `defmacro` со своей позиционной формой.
+
+```lisp
+(import datetime)
+(defvar t0 ((timer-start) . :fixnum))
+(print (iso-utc 0))              ;; 1970-01-01T00:00:00Z
+(print (seconds->hms 3661))      ;; (1 1 1)
+(print (timer-elapsed-ms t0))    ;; 0
+```
+
 ## 18.8.1 QSRD — бинарная сериализация
 
 | Qualisp | Python |
@@ -279,13 +335,13 @@ Bias — строка `(1 m)`, broadcast `(n m) + (1 m)` даёт per-column bia
 QSRD v1/Q2 — бинарный формат с magic `"QSRD"`, u16 major/minor, таблицей секций с crc32 и секциями `meta`, `symbols`, `forms`, `data`, `model`. Символы хранятся один раз и ссылаются по `u32`-индексу. `save-weights` пишет только `meta`/`symbols`/`model`: параметры — стабильные тензоры с `requires_grad` в порядке `SymbolId`. `load-weights` сначала валидирует **все** параметры (неизвестное имя или несовпадение dtype/формы — ошибка без частичного применения).
 
 ```lisp
-(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
-(defvar b (:tensor :f32 (1))   (param (tensor (0.5))))
+(defvar w ((param (tensor ((1.0 2.0) (3.0 4.0)))) . (:tensor :f32 (2 2))))
+(defvar b ((param (tensor (0.5))) . (:tensor :f32 (1))))
 (save-weights "w.qsrd" (list 7 8))
 (load-weights "w.qsrd")   ;; → (7 8)
 ```
 
-> 🐍 `pickle` не сохраняет dtype/shape тензоров — QSRD хранит S-выражения, тензоры с dtype и формой, скаляры и состояние в одном файле. Не сериализуются JIT-страницы, скомпилированные графы, планы `ns-if`, `future` и raw-указатели. `qsrd-save`/`qsrd-load` как имен API в 0.19.15 нет: рабочий путь — `save-image`/`save-weights`.
+> 🐍 `pickle` не сохраняет dtype/shape тензоров — QSRD хранит S-выражения, тензоры с dtype и формой, скаляры и состояние в одном файле. Не сериализуются JIT-страницы, скомпилированные графы, планы `ns-if`, `future` и raw-указатели. `qsrd-save`/`qsrd-load` как имен API в 0.19.16 нет: рабочий путь — `save-image`/`save-weights`.
 
 ## 18.8.2 Аргументы командной строки: `argparse`
 
@@ -310,13 +366,23 @@ QSRD v1/Q2 — бинарный формат с magic `"QSRD"`, u16 major/minor,
 
 | Qualisp | Python-мир |
 |---|---|
-| `(defun f (x :fixnum) :fixnum …)` + `(f 1)` | `def f(x): …` — тело компилируется в JIT-страницу **при определении** |
-| `(defgraph g (x (:tensor :f32 (2))) … body)` | `torch.compile(fn)` — граф трассируется один раз и компилируется лениво |
-| `(defuse f (x (:tensor :f32 (4)) a :flonum) …)` | fused-ядро: один x86-64 цикл с AVX2 (8 f32) + scalar-tail |
+| `(defun f ((x . :fixnum)) ((…) . :fixnum))` + `(f 1)` | `def f(x): …` — тело компилируется в JIT-страницу **при определении** |
+| `(defgraph g ((x . (:tensor :f32 (2)))) ((…) . :flonum))` | `torch.compile(fn)` — граф трассируется один раз и компилируется лениво |
+| `(defuse f ((x . (:tensor :f32 (4))) (a . :flonum)) ((…) . (:tensor :f32 (4))))` | fused-ядро: один x86-64 цикл с AVX2 (8 f32) + scalar-tail |
 | `qualisp --trace tr.json script.qlsp` | `python -m cProfile -o tr.prof script.py` |
 | `qprof tr.json --top 10` | `pstats.Stats("tr.prof").sort_stats("cumulative").print_stats(10)` |
 
 Явного `(jit f)`/`(discard-jit f)` в языке нет: компиляция прозрачна, а страница — выбрасываемый кэш, который пересобирается из мастер-формы. Ошибки рантайма несут исходную позицию благодаря source maps (`file:line:col: message`).
+
+JIT использует **unboxed fixnum-локальные** (M3a): слоты кадра имеют вид `value | raw_int`, параметры и `let`-биндинги с доказанным `:fixnum` хранятся без тега, `emitRaw` считает арифметику/сравнения над raw-слотами, а боксинг происходит на границе (вызов, возврат, захват замыканием). Функции с `lambda` в теле raw отключают. Замер ReleaseFast, 2M итераций: цикл с одним `+` 10.22 → 3.15 нс (3.2×), с двумя `+` 14.94 → 4.49 нс (3.3×); глобалы (17.36 → 17.59 нс) и вызовы (33.51 → 33.1 нс) остаются боксованными. Специализация-lite измерена и откачена: снятие tag-guard'ов дало 18.15 → 18.26 нс на арифметическом цикле; выигрыш даёт только unboxing локальных.
+
+```lisp
+(defun sum ((n . :fixnum))
+  ((let ((i 0) (acc 0)) (while (< i n) (setq acc (+ acc i)) (setq i (+ i 1))) acc) . :fixnum))
+(sum 10)   ;; 45
+```
+
+Релиз проверяется `zig build test`: **910 тестов** на Linux и 910 на Windows (909 именных `test "…"` плюс один анонимный блок в `src/tests.zig`).
 
 `--trace` пишет Chrome Trace JSON: события `B`/`E`, микросекунды, `pid=1,tid=1`; инструментированы границы вызовов функций, запуск HLO-графа и фаза `ns-if`. Компиляция JIT-страницы входит в inclusive-время первого вызова. Трасса пишется и при ошибке.
 
@@ -343,7 +409,9 @@ total self time: 21248.0 us
 
 ### 18.10.1 Встраивание
 
-В релизе поставляются два бинарника — `qualisp` (REPL/раннер с JIT) и `qprof` (агрегатор трасс). Встраиваемого C API (`qualisp_*`) в 0.19.15 нет: Lisp вызывается как программа через `qualisp script.qlsp [args…]` либо через REPL; внешний код обменивается данными через QSRD и потоковый вывод.
+В релизе поставляются два бинарника — `qualisp` (REPL/раннер с JIT) и `qprof` (агрегатор трасс); всего 6 файлов ассетов вместе с Windows-версиями, PDB и `SHA256SUMS.txt`. Встраиваемого C API (`qualisp_*`) в 0.19.16 нет: Lisp вызывается как программа через `qualisp script.qlsp [args…]` либо через REPL; внешний код обменивается данными через QSRD и потоковый вывод.
+
+LSP-инструмент поставляется **в исходниках, не в ассетах**: `libqualisplsp` (Zig, analysis-only C ABI) и `qualisp-lsp` (Rust, stdio JSON-RPC) собираются локально командой `bash tools/lsp/build.sh`, расширение VSCodium — чистый JS в `editors/vscode/`, самодостаточный `zig-out/qualisp.vsix` делает `python3 editors/vscode/package-vsix.py`. Готового `qualisp-lsp`, `libqualisplsp.so/.dll` и `.vsix` в релизных ассетах нет. Анализатор не исполняет формы верхнего уровня документа: только `read → macroexpand → typecheck`; диагностики, definition, hover, documentSymbol, completion, documentHighlight и semantic tokens приходят из Zig. Lisp-форм LSP (`lsp-hover`, `(import lsp)` и т. п.) в языке нет.
 
 ## 18.11 Параллелизм
 
@@ -356,11 +424,13 @@ total self time: 21248.0 us
 Глобалы в задаче доступны только для чтения; результат глубоко клонируется в stable при `await`. У задачи свой thread-local `Runtime` (свой scratch/world, копия глобалов). Возвращать future из future и ждать его в другом потоке нельзя.
 
 ```lisp
-(defvar f (:future :fixnum) (future (lambda () (+ 1 2))))
+(defvar f ((future (lambda () (+ 1 2))) . (:future :fixnum)))
 (print (await f))   ;; 3
 ```
 
-> 🐍 Мир задачи — снимок, ближе к `multiprocessing`, чем к общему heap потоков Python. Отдельного модуля `async` и примитивов `pmap`/`chan`/`thread-count` в 0.19.15 нет.
+Тензорные ядра параллелятся независимо от `future`: `src/kernel_pool.zig` — отдельный пул вычислительных потоков, лениво создаваемый на первом достаточно большом вызове (`max(1, min(cpu-1, 8))` воркеров). Параллельны `elementwise`/`map` (порог ~256K), `matmul` по строкам, `reshape`/`transpose`, `tsum`/`tmean` с фиксированным порядком сведения (побайтовый паритет с последовательным вариантом), а в NS — `fillBand`, выбор ветки, `countingSort`, `gatherRows`/`scatterRows`. У воркеров нет `Runtime`: буферы выделяет вызывающий, общие `frame.pool`, `grads[]`, `rt.trace` остаются на одном потоке; вложенный параллелизм на воркерах отключён. `QUALISP_SERIAL=1` отключает пул полностью. Замер ReleaseFast, 16 ядер: matmul 15.9 → 7.6 мс (2.10×).
+
+> 🐍 Мир задачи — снимок, ближе к `multiprocessing`, чем к общему heap потоков Python. Отдельного модуля `async` и примитивов `pmap`/`chan`/`thread-count` в 0.19.16 нет.
 
 ## 18.12 Ошибки
 
@@ -371,14 +441,24 @@ total self time: 21248.0 us
 | `(result-ok? r)` | `isinstance(r, Ok)` |
 | `(result-value r)` | `r.value` — полезная нагрузка `ok` |
 | `(result-message r)` | `str(e)` — сообщение ошибки |
+| `(result-error r)` | `e` — достаёт структуру ошибки из неудачного результата |
+| `(error-message e)` / `(error-kind e)` / `(error-cause e)` / `(error-traceback e)` | `e.args[0]` / тип исключения / `__cause__` / `traceback` |
+| `(format-error e)` | `traceback.format_exception(e)` — читаемый отчёт |
+| `(make-error "boom" 'user)` / `(with-cause e 42)` | конструктор исключения с категорией и причиной |
 | `(type-of r)` → `RESULT` | `type(r).__name__` |
 
-`Error` — структура с полями `message :string`, `cause :(:option (:struct Error))`, `traceback :(:list CallFrame)`; кадр — `(name file line form)`. Ошибки компиляции и типов — не `Error`-значения, а отказ с диагностикой со спаном (`error at 1:1: …` в REPL, `file:line:col: message` в файле). Хвостовые вызовы переименовывают верхний кадр, не растя стека.
+Модуль `error` входит в prelude (`core` и `error` доступны без импорта). `Error` — структура `(message :string, cause (:option :atom), traceback (:option (:list (:struct call-frame))), kind :symbol)`; кадр `call-frame` — `(name :symbol, file :string, line :fixnum, form :string)`. Категории `kind` — интернированные символы `runtime-error` (`'runtime`), `parse-error` (`'parse`), `type-error` (`'type`), `io-error` (`'io`), `user-error` (`'user`), сравниваются `eq`; `error-of?` сверяет категорию с символом. `throw` кладёт брошенное значение в `cause`, `message` — его печатное представление; кадры наполняются из source map Q4a (`name/file/line/form`), при отсутствии места — `file="<unknown>"`, `line=0`, `form=""`. Принтер структур печатает `#<tag …>`, в том числе `#<ERROR::ERROR "boom" nil nil USER>`. Непойманный `throw` в скрипте печатает `file:line:col: message`. Ошибки компиляции и типов — не `Error`-значения, а отказ с диагностикой со спаном (`error at 1:1: …` в REPL, `file:line:col: message` в файле). Хвостовые вызовы переименовывают верхний кадр, не растя стека.
 
 ```lisp
 (print (result-ok? (catch-error (lambda () 42))))   ;; t
 (print (result-value (catch-error (lambda () 42)))) ;; 42
-(print (result-message (catch-error (lambda () (throw "boom"))))) ;; "boom"
+(print (result-message (catch-error (lambda () (throw "boom"))))) ;; boom
+
+(defvar e ((result-error (catch-error (lambda () (throw 42)))) . (:struct error)))
+(print (error-message e))   ;; 42
+(print (error-kind e))      ;; USER
+(print (error-cause e))     ;; 42
+(print (format-error e))    ;; Error: 42 (user)\n  at LAMBDA  <file>:<line>  in (THROW 42)
 ```
 
-> 🐍 `try`, `ok?`, `err?`, `ok`, `err`, `error-message` как функции в 0.19.15 отсутствуют: `try` описан как макрос, но в REPL-контексте не разрешается; рабочий путь — `catch-error` + `result-*`.
+> 🐍 `try`, `ok?`, `err?`, `ok`, `err` как функции отсутствуют; `error-message`, `error-kind`, `result-error` и `format-error` — рабочие функции (модуль `error` в prelude). Глобальной функции `traceback` нет: аксессор — `error-traceback`.

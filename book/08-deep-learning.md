@@ -1,6 +1,6 @@
 # Глава 8. Глубокое обучение
 
-Глава про построение нейросетей: слои как чистые функции, прямой проход, цикл обучения, классические метрики ML и состояние оптимизаторов. Модуль `dl` (`src/stdlib/dl.qlsp`, 10 635 байт) работает поверх eager-тензоров и autograd (гл. 6–7); `ml` отвечает за оценку и подготовку данных; символьный мост `neuro` описан в гл. 14.
+Глава про построение нейросетей: слои как чистые функции, прямой проход, цикл обучения, классические метрики ML и состояние оптимизаторов. Модуль `dl` (`src/stdlib/dl.qlsp`, 10 777 байт) работает поверх eager-тензоров и autograd (гл. 6–7); `ml` отвечает за оценку и подготовку данных; символьный мост `neuro` описан в гл. 14. Среди доступных из DL-кода возможностей — унарная математика `sin`/`cos`/`sqrt`/`atan` в графе, термы градиента (`ones-like`, `tmax-mask`, `relu-mask`, `reshape-like`), символьный `(grad term var)` и параллельные ядра matmul/elementwise/reduce.
 
 ## 8.1 Модуль `dl`: чистые функции над тензорами
 
@@ -8,7 +8,7 @@
 (import DL)
 ```
 
-`dl` даёт **чистые функции** над 2-D тензорами `:f32` формы «batch × features»: слой — это вызов `linear-forward`, сеть — `mlp-forward`, потери — `mse-loss`, шаг — `sgd-step`/`adam-step`. Переданные тензоры не мутируются, результат — новый тензор или новая структура.
+`dl` даёт **чистые функции** над 2-D тензорами `:f32` формы «batch × features»: слой — это вызов `linear-forward`, сеть — `mlp-forward`, потери — `mse-loss`, шаг — `sgd-step`/`adam-step`. Переданные тензоры не мутируются, результат — новый тензор или новая структура. Исходник модуля использует парные аннотации: `(defun linear-forward ((x . (:tensor :f32 (_ _))) …) ((+ (matmul x w) b) . (:tensor :f32 (_ _))))`, поля структур — `(param . (:tensor :f32 (_ _)))`.
 
 Структуры модуля (слоты — wildcard-формы `(_ _)`):
 
@@ -64,45 +64,46 @@
 
 ```lisp
 (import dl)
-(defvar m (:struct linear-model) (linear-regression-step
-   (tensor ((1.0) (2.0) (3.0)))
-   (tensor ((2.0) (4.0) (6.0)))
-   (tensor ((0.0)))
-   (tensor ((0.0)))
-   0.1))
-(slot-value m 'w)   ;; → тензор, близкий к ((2.0))
-(slot-value m 'b)   ;; → тензор, близкий к ((0.0))
+(defvar xs ((tensor ((1.0) (2.0) (3.0))) . (:tensor :f32 (3 1))))
+(defvar ys ((tensor ((2.0) (4.0) (6.0))) . (:tensor :f32 (3 1))))
+(defvar m ((linear-regression-step xs ys (tensor ((0.0))) (tensor ((0.0))) 0.1)
+           . (:struct linear-model)))
+(defvar epoch (0 . :fixnum))
+(while (< epoch 100)
+  (setq m (linear-regression-step xs ys (slot-value m 'w) (slot-value m 'b) 0.1))
+  (setq epoch (+ epoch 1)))
+(tref (slot-value m 'w) 0 0)   ;; → 1.9917595386505127 — близко к 2.0
+(tref (slot-value m 'b) 0 0)   ;; → 0.01873299665749073 — близко к нулю
 ```
 
-`linear-grads` считает `err = xW + b − y`, `dW = xᵀ·err`, `db = sum(err)`; `lr` относится к «суммарному» градиенту (при желании среднего по батчу делите `lr` на `n`).
+`linear-grads` считает `err = xW + b − y`, `dW = xᵀ·err`, `db = sum(err)`; `lr` относится к «суммарному» градиенту (при желании среднего по батчу делите `lr` на `n`). Один шаг даёт `w ≈ 2.8` — сходимость видна на последующих шагах.
 
 ## 8.2 Полный пример: XOR (DL)
 
 Источник — `examples/xor.qlsp` (проверенный прогон). Сеть 2→3→1 с `tanh`, полный батч, SGD на месте через `tset!`:
 
 ```lisp
-(defvar x   (:tensor :f32 (4 2)) (tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))))
-(defvar tgt (:tensor :f32 (4 1)) (tensor ((0.0) (1.0) (1.0) (0.0))))
+(defvar x   ((tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))) . (:tensor :f32 (4 2))))
+(defvar tgt ((tensor ((0.0) (1.0) (1.0) (0.0))) . (:tensor :f32 (4 1))))
 
-(defvar w1 (:tensor :f32 (2 3)) (param (tensor ((0.5 -0.4 0.3) (-0.2 0.6 -0.5)))))
-(defvar b1 (:tensor :f32 (3))   (param (tensor (0.1 -0.1 0.0))))
-(defvar w2 (:tensor :f32 (3 1)) (param (tensor ((0.7) (-0.8) (0.9)))))
-(defvar b2 (:tensor :f32 (1))   (param (tensor (0.0))))
+(defvar w1 ((param (tensor ((0.5 -0.4 0.3) (-0.2 0.6 -0.5)))) . (:tensor :f32 (2 3))))
+(defvar b1 ((param (tensor (0.1 -0.1 0.0))) . (:tensor :f32 (3))))
+(defvar w2 ((param (tensor ((0.7) (-0.8) (0.9)))) . (:tensor :f32 (3 1))))
+(defvar b2 ((param (tensor (0.0))) . (:tensor :f32 (1))))
 
-(defgraph xor-loss (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
-                    w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1)) tgt (:tensor :f32 (4 1)))
-                   :flonum
-  (let ((h (tanh (+ (matmul x w1) b1))))
-    (let ((p (+ (matmul h w2) b2)))
-      (let ((d (- p tgt)))
-        (tmean (* d d))))))
+(defgraph xor-loss ((x . (:tensor :f32 (4 2))) (w1 . (:tensor :f32 (2 3))) (b1 . (:tensor :f32 (3)))
+                    (w2 . (:tensor :f32 (3 1))) (b2 . (:tensor :f32 (1))) (tgt . (:tensor :f32 (4 1))))
+  ((let ((h (tanh (+ (matmul x w1) b1))))
+     (let ((p (+ (matmul h w2) b2)))
+       (let ((d (- p tgt)))
+         (tmean (* d d))))) . :flonum))
 
-(defgraph xor-predict (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
-                       w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1))) (:tensor :f32 (4 1))
-  (+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2))
+(defgraph xor-predict ((x . (:tensor :f32 (4 2))) (w1 . (:tensor :f32 (2 3))) (b1 . (:tensor :f32 (3)))
+                       (w2 . (:tensor :f32 (3 1))) (b2 . (:tensor :f32 (1))))
+  ((+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2) . (:tensor :f32 (4 1))))
 
-(defvar lr :flonum 0.5)
-(defvar epoch :fixnum 0)
+(defvar lr (0.5 . :flonum))
+(defvar epoch (0 . :fixnum))
 (while (< epoch 5000)
   (grad! (xor-loss x w1 b1 w2 b2 tgt))
   (tset! w1 0 0 (- (tref w1 0 0) (* lr (tref (grad-of w1) 0 0))))
@@ -110,12 +111,12 @@
   (tset! b2 0 (- (tref b2 0) (* lr (tref (grad-of b2) 0))))
   (setq epoch (+ epoch 1)))
 
-(defvar y (:tensor :f32 (4 1)) (xor-predict x w1 b1 w2 b2))
+(defvar y ((xor-predict x w1 b1 w2 b2) . (:tensor :f32 (4 1))))
 (print (tref y 0 0))   ;; → ≈ 0
 (print (tref y 1 0))   ;; → ≈ 1
 ```
 
-> Веса — `param` и аргументы графа: всё, что трассировщик видит как константу (`tensor`-литерал в теле), градиента не получит. `let` связывает параллельно, поэтому зависимые биндинги вложены.
+> Веса — `param` и аргументы графа: всё, что трассировщик видит как константу (`tensor`-литерал в теле), градиента не получит. `let` связывает параллельно, поэтому зависимые биндинги вложены. Матрицы здесь маленькие (4×2, 2×3), поэтому parallel-пул их не трогает: маленькие входы остаются последовательными и результат побитово совпадает с serial (гл. 6).
 
 ### Python-эквивалент (PyTorch)
 
@@ -186,6 +187,7 @@ print(model(X))  # → [[~0], [~1], [~1], [~0]]
 - Графа как значения языка нет: `defgraph` — мастер-форма, скомпилированный граф — производный артефакт. `(grad! …)` работает с последним запуском в текущей форме.
 - Нет in-place оптимизатора, разреженных шагов по строкам и снимков состояния: для чекпоинта используйте `save-weights`/`load-weights` (гл. 6).
 - Шаг обучения — пользовательская функция, которая в одной форме делает `grad!`, чтение `grad-of` и `tset!`; результат шага можно вернуть как loss.
+- Альтернатива численному backward для скалярного лосса — символьный `(grad term var)` из `symbolic`: он возвращает терм градиента (`ones-like`, `tmax-mask`, `relu-mask`, `reshape-like`, `transpose`, `matmul` по обоим аргументам и т. д.), который можно компилировать через `term` и сверять с `grad-of` (гл. 7).
 
 > 🐍 `optimizer.step()` в PyTorch заменяется явным проходом по элементам с `tset!`; `state_dict()` — структурой `adam-state`, которую можно передавать как обычное значение.
 
@@ -194,18 +196,18 @@ print(model(X))  # → [[~0], [~1], [~1], [~0]]
 Граф задаётся `defgraph`, а его вызов и есть forward. Для тех же весов обычно определяется `xor-predict`-граф, отличный от графа потерь:
 
 ```lisp
-(defgraph predict (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
-                     w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1))) (:tensor :f32 (4 1))
-  (+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2))
+(defgraph predict ((x . (:tensor :f32 (4 2))) (w1 . (:tensor :f32 (2 3))) (b1 . (:tensor :f32 (3)))
+                   (w2 . (:tensor :f32 (3 1))) (b2 . (:tensor :f32 (1))))
+  ((+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2) . (:tensor :f32 (4 1))))
 
-(defvar y (:tensor :f32 (4 1)) (predict x w1 b1 w2 b2))   ;; нативный инференс
+(defvar y ((predict x w1 b1 w2 b2) . (:tensor :f32 (4 1))))   ;; нативный инференс
 ```
 
 Первый вызов графа компилирует его в x86-64 (fused-ядра — call-threaded, W^X-страница), последующие идут без ожидания; фоновая компиляция — `N = min(cpu_count, 8)` воркеров. Для одного elementwise-выражения вместо графа можно определить `defuse`:
 
 ```lisp
-(defuse affine (x (:tensor :f32 (4)) a :flonum b :flonum) (:tensor :f32 (4))
-  (relu (+ (* x a) b)))
+(defuse affine ((x . (:tensor :f32 (4))) (a . :flonum) (b . :flonum))
+  ((relu (+ (* x a) b)) . (:tensor :f32 (4))))
 ```
 
 Eager-вызов `defuse` компилирует скалярный f32-цикл с AVX2 по 8 чисел + scalar-tail, без промежуточных тензоров. Внутри `defgraph` вызов `defuse` инлайнится в `let` перед трассировкой, поэтому такой forward/backward идёт обычными HLO-узлами.
@@ -215,6 +217,8 @@ Eager-вызов `defuse` компилирует скалярный f32-цикл
 - Константы тела графа (`tensor`, `zeros`/`ones`/`randn`) трассируются один раз и становятся stable-тензорами графа: они переживают границу формы и не требуют `grad!`.
 - Управление статическое: ветвления по значениям тензоров, `tref`/`tset!` внутри графа не поддерживаются.
 - Под трассировкой нет рекурсии и вложенных `defgraph`; data-dependent control flow отсутствует.
+- В графе доступны `sin`/`cos`/`sqrt`/`atan` с forward- и backward-ядрами; `pow`/`argmax` по-прежнему нет.
+- Большие `matmul`, `elementwise`/`map`, `reshape`, `transpose`, `tsum`/`tmean` исполняются параллельно через `kernel_pool`; `max`, `softmax`, `argmax`, `reduceToShape` остаются последовательными. Параллельный проход побайтно совпадает с последовательным, `QUALISP_SERIAL=1` отключает пул (гл. 6).
 
 > 🐍 Аналог `torch.compile(model)` — но граф собирается вручную через `defgraph`/`defuse`, без автоматической трассировки `model.forward`.
 
@@ -224,8 +228,8 @@ Eager-вызов `defuse` компилирует скалярный f32-цикл
 
 ```lisp
 (import dl)
-(defvar logits (:tensor :f32 (_ _)) (mlp-forward x w1 b1 w2 b2))  ;; обычный вызов
-(defvar yhat (:tensor :f32 (4 1)) (predict x w1 b1 w2 b2))         ;; вызов графа
+(defvar logits ((mlp-forward x w1 b1 w2 b2) . (:tensor :f32 (_ _))))  ;; обычный вызов
+(defvar yhat ((predict x w1 b1 w2 b2) . (:tensor :f32 (4 1))))        ;; вызов графа
 ```
 
 Специальной формы `no_grad` не нужно: `param` лишь разрешает `grad!` заполнить `grad-of`, а не меняет поведение самих операций. Термы `neuro` добавляют к этому символьную проверку градиента (гл. 14).
@@ -236,9 +240,10 @@ Eager-вызов `defuse` компилирует скалярный f32-цикл
 
 - Модуль работает только с `:f32` и только с 2-D тензорами «batch × features»; полиморфизма по dtype и рангу нет.
 - Нет слоёв-как-данных, `nn.Module`, `Sequential` с произвольным порядком и автоматической трассировки `model.forward`: графы собираются вручную.
-- Нет свёрточных/пулинговых примитивов, нормализаций, dropout и 2-D softmax; символьные термы — в `neuro` (гл. 14).
+- Нет свёрточных/пулинговых примитивов, нормализаций, dropout и 2-D softmax; символьные термы — в `neuro` (гл. 14). Унарная математика `sin`/`cos`/`sqrt`/`atan`, напротив, в графе есть.
 - Нет in-place шага оптимизатора: веса обновляются `tset!` по `(grad-of w)`; шаги `dl` чистые и требуют wildcard-формы `(_ _)` у принимающих переменных.
 - Нет разреженных шагов по строкам и снимков состояния оптимизатора: для сохранения весов — `save-weights`/`load-weights`.
 - Нет прямого доступа к форме тензора из рантайма: несовпадение ловит ядро или broadcast, а не проверка в stdlib.
 - Имена структур `dl` специфичны (теги не мангляются по модулю).
 - `ml` считает метрики по спискам и одну метрику по 1-D тензору; 2-D вход в `t-mse` не типизируется.
+- Параллельные ядра ускоряют matmul и elementwise на больших входах, но `max`/`softmax`/`argmax`/`reduceToShape` остаются последовательными; маленькие батчи (как XOR) parallel-пул не трогает.

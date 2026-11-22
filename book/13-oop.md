@@ -3,26 +3,28 @@
 Основной способ объявить собственный тип данных в Qualisp — **структура**: запись с фиксированным набором типизированных полей, методами через `impl` и контрактами через трейты. Наследования и vtable нет: у структуры один layout, методы диспетчатся статически по типу первого аргумента.
 
 ```lisp
-(defstruct pt ((x :fixnum) (y :fixnum)))
-(defvar p (:struct pt) (pt 1 2))
+(defstruct pt ((x . :fixnum) (y . :fixnum)))
+(defvar p ((pt 1 2) . (:struct pt)))
 (slot-value p 'x)        ;; → 1
 (set-slot p 'x 10)       ;; запись поля
 (type-of p)              ;; → STRUCT
 ```
 
-> ⚠️ Тип при объявлении переменной обязателен: `(defvar p (pt 1 2))` отвергается компилятором. Пишите `(defvar p (:struct pt) (pt 1 2))`.
+> ⚠️ Тип при объявлении переменной обязателен и пишется парой: `(defvar p (pt 1 2))` отвергается компилятором. Пишите `(defvar p ((pt 1 2) . (:struct pt)))`.
 
 ## 13.1 Определение и конструктор
 
-`(defstruct имя ((поле :тип) …))` объявляет структуру: имя и список пар «поле — тип». Поле без типа объявлять нельзя — каждый элемент списка должен иметь вид `(имя :тип)`:
+`(defstruct имя ((поле . :тип) …))` объявляет структуру: имя и список пар «поле — тип». Поле без типа объявлять нельзя — каждый элемент списка должен иметь вид `(имя . :тип)`:
 
 ```lisp
-(defstruct pt ((x :fixnum) (y :fixnum)))
+(defstruct pt ((x . :fixnum) (y . :fixnum)))
 
-(defvar p (:struct pt) (pt 1 2))
-(print p)               ;; → #<struct>
+(defvar p ((pt 1 2) . (:struct pt)))
+(print p)               ;; → #<PT 1 2>
 (print (type-of p))     ;; → STRUCT
 ```
+
+Dotted pair здесь — данные: cdr аннотации это тип, поэтому `(x . :fixnum)` не может быть принят за вызов. Позиционная запись `(x :fixnum)` отвергается с диагностикой `field must be (name . :type)`.
 
 Конструктор — функция с именем структуры; она принимает значения полей в порядке объявления и возвращает `(:struct pt)`:
 
@@ -60,7 +62,7 @@
 В слоте живёт обычное значение — число, список, другая структура или тензор:
 
 ```lisp
-(defstruct one ((v (:list :fixnum))))
+(defstruct one ((v . (:list :fixnum))))
 (print (slot-value (one (list 1 2 3)) 'v))   ;; → (1 2 3)
 ```
 
@@ -74,17 +76,17 @@
 
 ## 13.4 Методы: impl и диспетч по первому аргументу
 
-Методы структуры объявляются формой `impl`; внутри — обычные `defun` с обязательной аннотацией возврата. Тип `self` выводится из имени структуры:
+Методы структуры объявляются формой `impl`; внутри — обычные `defun`, у которых аннотация результата — последняя форма тела `(expr . :type)`. Тип `self` выводится из имени структуры, поэтому в списке параметров методов `self` остаётся голым символом:
 
 ```lisp
-(defstruct vec2 ((x :fixnum) (y :fixnum)))
+(defstruct vec2 ((x . :fixnum) (y . :fixnum)))
 
 (impl vec2
-  (defun len2 (self) :fixnum
-    (+ (* (slot-value self 'x) (slot-value self 'x))
-       (* (slot-value self 'y) (slot-value self 'y))))
-  (defun show (self) :string
-    (number-to-string (len2 self))))
+  (defun len2 (self)
+    ((+ (* (slot-value self 'x) (slot-value self 'x))
+        (* (slot-value self 'y) (slot-value self 'y))) . :fixnum))
+  (defun show (self)
+    ((number-to-string (len2 self)) . :string)))
 
 (print (len2 (vec2 3 4)))   ;; → 25
 (print (show (vec2 3 4)))   ;; → 25
@@ -93,11 +95,11 @@
 **Диспетч идёт по первому аргументу.** Одно и то же имя метода у разных структур — разные реализации:
 
 ```lisp
-(defstruct a-st ((v :fixnum)))
-(defstruct b-st ((v :fixnum)))
+(defstruct a-st ((v . :fixnum)))
+(defstruct b-st ((v . :fixnum)))
 
-(impl a-st (defun tag (self) :symbol 'a))
-(impl b-st (defun tag (self) :symbol 'b))
+(impl a-st (defun tag (self) ('a . :symbol)))
+(impl b-st (defun tag (self) ('b . :symbol)))
 
 (print (list (tag (a-st 1)) (tag (b-st 2))))  ;; → (A B)
 ```
@@ -105,14 +107,14 @@
 Граничные случаи дают внятные ошибки: нет метода у типа или первый аргумент не структура — вызов не разрешается. Метод — обычная функция, он может вызывать другие методы того же типа; `self` можно мутировать через `set-slot`:
 
 ```lisp
-(defstruct counter ((n :fixnum)))
+(defstruct counter ((n . :fixnum)))
 
 (impl counter
-  (defun bump (self) :fixnum
+  (defun bump (self)
     (set-slot self 'n (+ (slot-value self 'n) 1))
-    (slot-value self 'n)))
+    ((slot-value self 'n) . :fixnum)))
 
-(defvar c (:struct counter) (counter 41))
+(defvar c ((counter 41) . (:struct counter)))
 (print (bump c))              ;; → 42
 (print (slot-value c 'n))     ;; → 42
 ```
@@ -127,12 +129,12 @@
 
 ```lisp
 (deftrait display
-  (show (self :self) :string))
+  (show ((self . :self)) . :string))
 
-(defstruct box ((v :fixnum)) (display))
+(defstruct box ((v . :fixnum)) (display))
 
 (impl box
-  (defun show (self) :string (number-to-string (slot-value self 'v))))
+  (defun show (self) ((number-to-string (slot-value self 'v)) . :string)))
 
 (print (show (box 7)))      ;; → 7
 ```
@@ -140,26 +142,26 @@
 Правила:
 
 - `defstruct` перечисляет трейты третьим аргументом; `impl` реализует методы.
+- Сигнатура метода трейта — `(имя параметры . :тип_результата)`; `self` внутри параметров остаётся голым символом.
 - `:self` в сигнатуре трейта означает «тип структуры, реализующей трейт».
 - Трейт — не значение: его нельзя вызвать или передать аргументом. `(deftrait display …)` возвращает символ `DISPLAY`.
 - Полнота реализации проверяется статически на вызове: если метод не реализован, вызов даёт `unknown function` (объявление структуры с нереализованным трейтом само по себе ошибки не даёт).
 - Дефолтных тел у методов трейта нет. Метод можно объявить и без treйта — через `impl` он работает как обычная перегрузка по первому аргументу.
 
-> 🐍 **Python-аналогия.** Трейт ≈ `typing.Protocol` без реализаций по умолчанию: `(defstruct box ((v :fixnum)) (display))` ≈ `class Box(Displayable): ...`.
+> 🐍 **Python-аналогия.** Трейт ≈ `typing.Protocol` без реализаций по умолчанию: `(defstruct box ((v . :fixnum)) (display))` ≈ `class Box(Displayable): ...`.
 
 ## 13.6 Типизированные поля
 
-Каждое поле объявляется парой `(имя :тип)`. Поддерживаются базовые типы (`:fixnum`, `:flonum`, `:bool`, `:symbol`, `:string`) и составные:
+Каждое поле объявляется парой `(имя . :тип)`. Поддерживаются базовые типы (`:fixnum`, `:flonum`, `:bool`, `:symbol`, `:string`) и составные:
 
 ```lisp
-(defstruct mix ((n :fixnum)
-                (f :flonum)
-                (s (:list :fixnum))
-                (tn (:tensor :f32 (2)))
-                (o (:option :symbol))))
+(defstruct mix ((n . :fixnum)
+                (f . :flonum)
+                (s . (:list :fixnum))
+                (tn . (:tensor :f32 (2)))
+                (o . (:option :symbol))))
 
-(defvar m (:struct mix)
-  (mix 7 2.5 (list 1 2) (tensor (1.0 2.0)) 'sym))
+(defvar m ((mix 7 2.5 (list 1 2) (tensor (1.0 2.0)) 'sym) . (:struct mix)))
 
 (print (slot-value m 'n))           ;; → 7
 (print (slot-value m 'f))           ;; → 2.5
@@ -167,7 +169,7 @@
 (print (type-of (slot-value m 'tn)));; → TENSOR
 ```
 
-Конструктор и `set-slot` проверяют тип поля; неизвестный тип в объявлении — ошибка `field must be (name :type)`. Имя поля должно быть символом: `t` — литерал истины, поэтому `(t (:fixnum))` как поле не работает.
+Конструктор и `set-slot` проверяют тип поля; неизвестный тип или позиционная запись в объявлении — ошибка `field must be (name . :type)`. Имя поля должно быть символом: `t` — литерал истины, поэтому `(t . :fixnum)` как поле не работает.
 
 > 🐍 **Python-аналогия.** Это аннотации полей `@dataclass`, только проверка строгая и выполняется компилятором: `ctypes.Structure` молча приводит значения, а здесь несовпадение типа — отказ.
 
@@ -176,7 +178,7 @@
 Структура — атом с тегом и типизированными слотами; она живёт по общим правилам памяти Qualisp:
 
 - Структура, созданная внутри формы, живёт в scratch-скоупе этой формы; возвращённое значение копируется в родительский scope.
-- `defvar` глубоко копирует значение в stable: `(defvar q (:struct pt) p)` создаёт независимую структуру, а не алиас `p`.
+- `defvar` глубоко копирует значение в stable: `(defvar q (p . (:struct pt)))` создаёт независимую структуру, а не алиас `p`.
 - Глобалы и замыкания не ссылаются на scratch; запись scratch-значения в stable — копия.
 - Изменение через `set-slot` меняет структуру на месте; `setq` того же биндинга заменяет значение целиком.
 - Явное удаление — `clear`; GC и reference counting в реализации не используются.
@@ -188,14 +190,13 @@
 Структуры уместны для **состояния** — параметров, конфигураций, узлов деревьев: в модуле `dl` это `defstruct adam-state`, `linear-model`, `momentum-state` и другие. Само **поведение** (forward-вычисление) описывается обычными функциями и графами `defgraph`/`defuse`, а не виртуальными методами:
 
 ```lisp
-(defstruct linear ((w (:tensor :f32 (2 2))) (b (:tensor :f32 (2)))))
+(defstruct linear ((w . (:tensor :f32 (2 2))) (b . (:tensor :f32 (2)))))
 
-(defun forward (x (:tensor :f32 (2 2)) m (:struct linear)) (:tensor :f32 (2 2))
-  (+ (matmul x (slot-value m 'w)) (slot-value m 'b)))
+(defun forward ((x . (:tensor :f32 (2 2))) (m . (:struct linear)))
+  ((+ (matmul x (slot-value m 'w)) (slot-value m 'b)) . (:tensor :f32 (2 2))))
 
-(defvar m (:struct linear)
-  (linear (tensor ((1.0 0.0) (0.0 1.0))) (tensor (0.5 0.5))))
-(defvar xs (:tensor :f32 (2 2)) (tensor ((1.0 2.0) (3.0 4.0))))
+(defvar m ((linear (tensor ((1.0 0.0) (0.0 1.0))) (tensor (0.5 0.5))) . (:struct linear)))
+(defvar xs ((tensor ((1.0 2.0) (3.0 4.0))) . (:tensor :f32 (2 2))))
 
 (print (forward xs m))   ;; → #<tensor>
 ```
@@ -208,17 +209,18 @@
 
 | Qualisp | Python | Комментарий |
 |---|---|---|
-| `(defstruct pt ((x :fixnum) (y :fixnum)))` | `@dataclass class Point:` | запись с фиксированным layout |
+| `(defstruct pt ((x . :fixnum) (y . :fixnum)))` | `@dataclass class Point:` | запись с фиксированным layout |
 | `(pt 1 2)` | `Point(1, 2)` | конструктор — функция |
-| `(defvar p (:struct pt) (pt 1 2))` | `p = Point(1, 2)` | тип переменной обязателен |
+| `(defvar p ((pt 1 2) . (:struct pt)))` | `p = Point(1, 2)` | тип переменной обязателен, парная аннотация |
 | `(slot-value p 'x)` | `p.x` | чтение поля |
 | `(set-slot p 'x 10)` | `p.x = 10` | запись с проверкой типа |
 | `(type-of p)` → `STRUCT` | `type(p)` | статический тип — `(:struct pt)` |
 | `(equal p q)` | `p is q` | идентичность, не сравнение полей |
-| `(impl pt (defun show (self) :string …))` | метод класса | диспетч по первому аргументу |
-| `(deftrait display (show (self :self) :string))` | `typing.Protocol` | контракт сигнатур, без тел |
-| `(defstruct box ((v :fixnum)) (display))` | `class Box(Displayable):` | структура заявляет трейт |
-| `(:fixnum)`, `(:tensor :f32 (2))` | аннотации полей | строгая проверка в конструкторе и `set-slot` |
+| `(impl pt (defun show (self) ((…) . :string)))` | метод класса | диспетч по первому аргументу |
+| `(deftrait display (show ((self . :self)) . :string))` | `typing.Protocol` | контракт сигнатур, без тел |
+| `(defstruct box ((v . :fixnum)) (display))` | `class Box(Displayable):` | структура заявляет трейт |
+| `(x . :fixnum)`, `(s . (:list :fixnum))` | аннотации полей | строгая проверка в конструкторе и `set-slot` |
+| `(print p)` → `#<PT 1 2>` | `repr(p)` | печать структуры с тегом и слотами |
 
 ## 13.10 Известные ограничения
 
@@ -228,4 +230,39 @@
 - **Дефолтных тел у методов трейта нет**: реализация обязана присутствовать в `impl` структуры, иначе вызов не разрешается.
 - **Структуры сравниваются только по идентичности**: пополевого сравнения `equal` не делает.
 - **Типы полей фиксированы при объявлении**: изменить layout существующего значения нельзя; для нового состояния объявляйте новую структуру.
-- **Печать краткая**: `(print p)` даёт `#<struct>` без списка полей; для отладки читайте слоты явно.
+- **Печать с тегом**: `(print p)` даёт `#<PT 1 2>` — тег структуры и значения слотов; `write-to-string` даёт читаемую форму.
+
+## 13.11 Встроенные структуры ошибок
+
+Стандартный модуль `error` (в prelude, `(import ERROR)` не нужен) определяет две структуры тем же самым `defstruct`, что описан выше:
+
+```lisp
+(defstruct call-frame
+  ((name . :symbol)
+   (file . :string)
+   (line . :fixnum)
+   (form . :string)))
+
+(defstruct error
+  ((message . :string)
+   (cause . (:option :atom))
+   (traceback . (:option (:list (:struct call-frame))))
+   (kind . :symbol)))
+```
+
+`kind` — категория ошибки: интернированный символ `'runtime`, `'parse`, `'type`, `'io` или `'user` (константы `runtime-error`, `parse-error`, `type-error`, `io-error`, `user-error`). Сравнивать категории нужно через `eq` или функцию `error-of?`, а не разбирать текст сообщения. `throw` кладёт брошенное значение в `cause`, сообщение — его печатное представление, кадры `call-frame` наполняются из source map (`name`, `file`, `line`, `form`).
+
+```lisp
+(defvar e ((result-error (catch-error (lambda () (throw 42)))) . (:struct error)))
+(print (error-kind e))       ;; → USER
+(print (error-message e))    ;; → 42
+(print (error-cause e))      ;; → 42
+(print (error-traceback e))  ;; → список кадров call-frame
+(print (format-error e))
+;; → Error: 42 (user)
+;;     at LAMBDA  ...  in (THROW 42)
+```
+
+`result-error : (:result T) → (:struct error)` достаёт структуру ошибки из неудачного результата; `make-error`/`with-cause` — конструкторы, `error-message`/`error-cause`/`error-traceback`/`error-kind` — аксессоры, `call-frame-name/-file/-line/-form` — аксессоры кадра. Примитив `format-error : (:struct error) → :string` собирает читаемый отчёт, не показывая внутренние теги (`#<ERROR::ERROR ...>`). Печать самой структуры использует тег и слоты: `#<ERROR::ERROR "boom" nil nil USER>`.
+
+> 🐍 Аналог — `@dataclass` с полями `message/cause/kind`; `format-error` играет роль `traceback.format_exception`, а `result-error` — распаковки `Result::Err`.

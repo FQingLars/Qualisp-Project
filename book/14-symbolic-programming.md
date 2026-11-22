@@ -142,11 +142,63 @@ Reader-макросов (`set-reader-macro`) в релизе нет. Субст�
 (poly-eval '(+ (* 2 x) 1) 'x 3.0) ; → 7.0
 ```
 
-`diff` поддерживает `+ - * / ^` с числовой степенью и упрощает результат, но **не приводит подобные**: производная `x·x` — `(+ X X)`, а не `(* 2 X)`. Приведение — отдельный слой S3 (`collect`/`diff-canonical`/`poly-*`). Полином — только `+ - * ^`, числа и одна переменная с неотрицательными целыми показателями; нулевой полином — `(0)`.
+`diff` — поэлементная производная. Арифметика n-арная (как в `term`): `+` суммирует, `*` раскрывает правило произведения для любого числа множителей, `-` — левая свёртка с унарным минусом; `/` и `^` бинарные, степень числовая. Унарные `sin/cos/exp/log/sqrt/tanh/atan` знают свои производные; `relu` отказывает (`diff: relu is not differentiable symbolically`), тензорные операции — `diff: not elementwise; use grad`. Результат упрощается, но **не приводит подобные**: производная `x·x` — `(+ X X)`, а не `(* 2 X)`. Приведение — отдельный слой S3 (`collect`/`diff-canonical`/`poly-*`). Полином — только `+ - * ^`, числа и одна переменная с неотрицательными целыми показателями; нулевой полином — `(0)`.
 
-Экспорты модуля: `variable?`, `free-of?`, `match`, `subst`, `rewrite`, `rewrite-all`, `simplify`, `diff`, `unify`, `derive`, `matches`, `collect`, `diff-canonical`, `poly?`, `poly-coeffs`, `poly-eval`.
+Унарная математика и n-арная арифметика на бинаре:
+
+```lisp
+(diff '(sin x) 'x)              ; → (COS X)
+(diff '(cos x) 'x)              ; → (* -1 (SIN X))
+(diff '(sqrt x) 'x)             ; → (/ 1 (* 2 (SQRT X)))
+(diff '(atan x) 'x)             ; → (/ 1 (+ 1 (^ X 2)))
+(diff '(- x) 'x)                ; → -1
+(diff '(+ x 1 2) 'x)            ; → 1
+(diff '(* 2 3 x) 'x)            ; → 6
+(diff '(^ x 3) 'x)              ; → (* 3 (^ X 2))
+(diff '(^ (+ x 1) 3) 'x)        ; → (* 3 (^ (+ X 1) 2))
+```
+
+Экспорты модуля: `variable?`, `free-of?`, `match`, `subst`, `rewrite`, `rewrite-all`, `simplify`, `diff`, `grad`, `unify`, `derive`, `matches`, `collect`, `diff-canonical`, `poly?`, `poly-coeffs`, `poly-eval`.
 
 > 🐍 Это «20 строк Lisp вместо sympy» для базовых CAS-задач: сопоставление, переписывание, упрощение и производные работают на обычном `:syntax`, без собственного AST.
+
+### Reverse-mode `(grad term var)`
+
+`grad` решает другую задачу, чем `diff`: это градиент **скалярного лосса `(tsum term)`** по `var`, а не поэлементная производная. Он нужен там, где поэлементной производной нет, — `matmul`, `transpose` и свёртки. В отличие от `grad!` (гл. 10), который идёт по последнему запуску HLO-графа, `grad` работает с термом `:syntax` и возвращает терм.
+
+```lisp
+(import SYMBOLIC)
+(grad '(tsum x) 'x)                       ; → (ONES-LIKE X)
+(grad '(tmean x) 'x)                      ; → (/ (ONES-LIKE X) (TSUM (ONES-LIKE X)))
+(grad '(tmax x) 'x)                       ; → (TMAX-MASK X)
+(grad '(tsum (matmul x y)) 'x)            ; → (MATMUL (ONES-LIKE (MATMUL X Y)) (TRANSPOSE Y))
+(grad '(tsum (transpose x)) 'x)           ; → (TRANSPOSE (ONES-LIKE (TRANSPOSE X)))
+(grad '(tsum (reshape x (2 3))) 'x)       ; → (RESHAPE-LIKE (ONES-LIKE (RESHAPE X (2 3))) X)
+(grad '(tsum (relu x)) 'x)                ; → (* (ONES-LIKE (RELU X)) (RELU-MASK X))
+(grad '(tsum (softmax x)) 'x)             ; → (* (SOFTMAX X) (- (ONES-LIKE (SOFTMAX X)) (TSUM (* (ONES-LIKE (SOFTMAX X)) (SOFTMAX X)))))
+```
+
+Правила `grad-step` (g — пришедший градиент):
+
+| Узел | Правило |
+|---|---|
+| `+` | сумма градиентов аргументов (`grad-add-list`) |
+| `-` | унарный минус / разность градиентов |
+| `*` | `∂a = g·b`, `∂b = g·a`; n-арное сводится к `b = (* …)` |
+| `/` | `g/b` и `−g·a/(b·b)` |
+| `^` | `g·n·a^(n−1)`, показатель должен быть числом |
+| `tsum` | `g · ones-like(a)` |
+| `tmean` | `(g · ones-like(a)) / tsum(ones-like(a))` |
+| `tmax` | `g · tmax-mask(a)` |
+| `matmul` | `matmul(g, transpose(b))` и `matmul(transpose(a), g)` |
+| `relu` | `g · relu-mask(a)` |
+| `softmax` (1-D) | `s · (g − tsum(g·s))`, где `s = softmax(a)` |
+| `transpose` | `transpose(g)` |
+| `reshape` | `reshape-like(g, a)` |
+| `ones-like`/`tmax-mask`/`relu-mask` | `0` |
+| унарные `sin…atan` | `g · unary-derivative-form(op, a)` |
+
+`grad` — это `(simplify (grad-step term var 1.0))`. Формы сохраняются отдельными тензорными операциями (`ones-like`, `tmax-mask`, `relu-mask`, `reshape-like`), поэтому `simplify` не склеивает их в арифметику и не теряет форму. Производные унарных операций берутся из той же таблицы, что и у `diff`. Аналитические градиенты сверены с autograd по каждому оператору (`src/stdlib_neuro_test.zig`).
 
 ## 14.8 Нейросимвольный слой: NS-примитивы и `ns-if`
 
@@ -205,19 +257,19 @@ Reader-макросов (`set-reader-macro`) в релизе нет. Субст�
 Рабочий пример (уменьшенная версия `bench/nsif_eager.qlsp`):
 
 ```lisp
-(defvar x (:tensor :f32 (4 8)) (randn :f32 (4 8)))
-(defvar a0 (:tensor :f32 (4)) (randn :f32 (4)))
-(defvar a1 (:tensor :f32 (4)) (randn :f32 (4)))
+(defvar x ((randn :f32 (4 8)) . (:tensor :f32 (4 8))))
+(defvar a0 ((randn :f32 (4)) . (:tensor :f32 (4))))
+(defvar a1 ((randn :f32 (4)) . (:tensor :f32 (4))))
 
 (ns-if (:payload x) (:eps 0.02)
   ((ns-grt a0 0)
-   (lambda (v (:tensor :f32 (4 8))) (* v 2.0)))
+   (lambda ((v . (:tensor :f32 (4 8)))) (* v 2.0)))
   ((ns-and (ns-lss a0 0) (ns-grt a1 0))
-   (lambda (v (:tensor :f32 (4 8))) (* v 3.0)))
+   (lambda ((v . (:tensor :f32 (4 8)))) (* v 3.0)))
   ((ns-and (ns-lss a0 0) (ns-lss a1 0))
-   (lambda (v (:tensor :f32 (4 8))) (* v 5.0)))
+   (lambda ((v . (:tensor :f32 (4 8)))) (* v 5.0)))
   (else
-   (lambda (v (:tensor :f32 (4 8))) (* v 11.0))))
+   (lambda ((v . (:tensor :f32 (4 8)))) (* v 11.0))))
 ```
 
 ### Смешанный батч: построчное слияние
@@ -260,6 +312,8 @@ Witness удовлетворяет `I`, то есть контрпример ф�
 | `NsIfNotPerRow` | результат ветки не по-строчный |
 | `NsIfNoAtomGradient` | *warning*: атомы нигде не использованы как значения |
 | `NsIfZeroEps` | *warning*: `ε = 0`, band пуст |
+
+Все перечисленные коды — отказы компиляции с диагностикой, а не значения `error`. Структурированные `error`/`call-frame` (модуль `error` в prelude, гл. 15) относятся к рантайм-исключениям `throw`/`catch-error`: брошенное значение попадает в `cause`, а кадры трейса наполняются из source map Q4a.
 
 ### Annealing `ε` вместо конфигурационных ключей
 
@@ -307,13 +361,13 @@ Backward:
 
 ## 14.10 Мост `neuro`: символьный терм → тензорный код
 
-Модуль `neuro` — мост между символьным термом и кодом над тензорами. Его экспортируют две формы:
+Модуль `neuro` — мост между символьным термом и кодом над тензорами. Его экспортируют три формы: `term`, `term->code` и `term-problem` (проверка терма без `throw`):
 
 ```lisp
 (import NEURO)
 
-(defun f (x (:tensor :f32 (4))) (:tensor :f32 (4))
-  (term '(+ (sin x) (* x x)) '(x)))
+(defun f ((x . (:tensor :f32 (4))))
+  ((term '(+ (sin x) (* x x)) '(x)) . (:tensor :f32 (4))))
 ```
 
 - `(term 'ТЕРМ '(vars))` — **макрос**, оба аргумента обязаны быть литералами; раскрывается в код над тензорами.
@@ -324,13 +378,26 @@ Backward:
 (term->code '(* (sin x) x) '(x)) ; → (* (SIN X) X)
 ```
 
-Трансляция покрывает `+ - * /`, `matmul`, унарные `sin cos tanh exp log sqrt relu atan`, свёртки `tsum tmean tmax`; скаляры арифметики идут broadcast; `^ n` разворачивается в произведение (`n = 0 → 1.0`, `n < 0 → (/ 1.0 (* …))`). Переменные обязаны быть перечислены в `vars`; глобал в графе — константа без градиента. Проверка отделена от генерации: внутренний `term-problem` возвращает первое сообщение, не бросая, а `term->code` бросает ровно один раз (после `throw` функции возвращают `nil`, и размазанная проверка давала бы вторичную диагностику).
+Трансляция покрывает арифметику `+ - * /` (n-арные), `matmul`, унарные `sin cos tanh exp log sqrt relu atan`, свёртки `tsum tmean tmax`, `transpose`, `reshape`, `reshape-like`, `ones-like`, `tmax-mask`, `relu-mask`, `softmax`; скаляры арифметики идут broadcast. `^ n` разворачивается в произведение (`n = 0 → 1.0`, `n = 1 → основание`, `n < 0 → (/ 1.0 (* …))`); составное основание связывается один раз через `let`, а не дублируется n раз. Переменные обязаны быть перечислены в `vars`; глобал в графе — константа без градиента. Проверка отделена от генерации: внутренний `term-problem` возвращает первое сообщение, не бросая, а `term->code` бросает ровно один раз (после `throw` функции возвращают `nil`, и размазанная проверка давала бы вторичную диагностику). Экспорт: `term term->code term-problem`; макрос `(term FORM VARS)` требует оба аргумента-литерала (`quote`).
+
+Новые операции и `^` над составным основанием (проверено на бинаре):
+
+```lisp
+(term->code '(^ (+ x 1) 3) '(x))   ; → (LET ((POW-0 (+ X 1))) (* POW-0 POW-0 POW-0))
+(term->code '(transpose x) '(x))   ; → (TRANSPOSE X)
+(term->code '(reshape x (2 3)) '(x))     ; → (RESHAPE X (2 3))
+(term->code '(reshape-like a b) '(a b))  ; → (RESHAPE-LIKE A B)
+(term->code '(ones-like x) '(x))   ; → (ONES-LIKE X)
+(term->code '(tmax-mask x) '(x))   ; → (TMAX-MASK X)
+(term->code '(relu-mask x) '(x))   ; → (RELU-MASK X)
+(term->code '(softmax x) '(x))     ; → (SOFTMAX X)
+```
 
 Один терм годится во всех трёх ролях: eager-функция, обучаемый `defgraph` (`(term …)` с `param`-переменными становится графом, в том числе в ветке `ns-if`) и сверка с аналитическим `diff`. Отрывок из `examples/term.qlsp` (`xs`/`ys` — обучающие данные, `lr` — шаг):
 
 ```lisp
-(defgraph loss (c (:tensor :f32 (1)) x (:tensor :f32 (4)) y (:tensor :f32 (4))) :flonum
-  (term '(tmean (* (- (* c (* x x)) y) (- (* c (* x x)) y))) '(c x y)))
+(defgraph loss ((c . (:tensor :f32 (1))) (x . (:tensor :f32 (4))) (y . (:tensor :f32 (4))))
+  ((term '(tmean (* (- (* c (* x x)) y) (- (* c (* x x)) y))) '(c x y)) . :flonum))
 
 (grad! (loss c xs ys))
 (tset! c 0 (- (tref c 0) (* lr (tref (grad-of c) 0))))
@@ -341,13 +408,15 @@ Backward:
 | `term` | макрос `neuro.qlsp` | тензорный код на месте вызова |
 | `term->code` | функция `neuro.qlsp` | `:syntax` с трансляцией |
 | `symbolic/diff` | функция `symbolic.qlsp` | аналитическая производная терма |
-| сверка | тесты `stdlib_neuro_test.zig` | `diff` совпадает с autograd |
+| `symbolic/grad` | функция `symbolic.qlsp` | reverse-mode градиент `(tsum term)` (см. §14.7) |
+| сверка | тесты `stdlib_neuro_test.zig` | `diff`/`grad` совпадают с autograd |
 
 > 🐍 Это `sympy.lambdify(expr)` в варианте «выражение → типизированный код над torch-тензорами»: одна и та же формула служит и моделью, и эталоном для проверки градиента.
 
 ## 14.11 Когда символьный слой полезен
 
 - **CAS-помощник:** `diff`/`diff-canonical`/`collect` строят формулу и сверяют её с autograd (`neuro`) без внешнего sympy.
+- **Reverse-mode градиент:** `(grad term var)` даёт градиент скалярного лосса для `matmul`, свёрток, `softmax`, `relu`, `reshape` — там, где поэлементного `diff` нет.
 - **Правила над данными:** `match`/`subst`/`rewrite-all`/`derive` работают с S-выражениями — факты, правила и запросы остаются обычными `:syntax`-данными.
 - **Нейросимвольная маршрутизация:** `ns-if` ведёт запись в одну из ветвей по знаку level-функции; каждая ветвь — обычный тензорный подграф (гл. 10).
 - **Метапрограммирование:** `:syntax` + `defmacro` + `read-from-string` + `eval` замыкают цикл «терм → текст → терм → код».
@@ -357,6 +426,8 @@ Backward:
 ## 14.12 Известные ограничения
 
 - `diff` не приводит подобные (`d(x·x)/dx = (+ X X)`); приведение — в `diff-canonical`/`collect`.
+- `diff` не знает `matmul`/`transpose`/`reshape`/`softmax`/масок: отказ `diff: not elementwise; use grad`; `relu` даёт `diff: relu is not differentiable symbolically`. Для них есть `(grad term var)` (reverse-mode, §14.7).
+- `grad` считает градиент скалярного лосса `(tsum term)`, а не поэлементную производную; `^` требует числового показателя (`grad: ^ needs a numeric exponent`).
 - `derive`/`matches` возвращают `:syntax`, а не `(:list :syntax)`; `(:list :syntax)` неконструируем.
 - Пустое окружение — `t`; `nil` означает «не совпало». `subst` принимает оба маркера.
 - `ns-if` — hard-роутер: нет blending и soft-режима, нет per-cell boundary, нет обучаемого `ε`, нет counterfactual-ветвей на band, нет автовывода покрытия, нет `ns-eq` как примитивного атома (только сахар), нет `:axis`.
@@ -366,4 +437,4 @@ Backward:
 - `ns-band` описан в `SPEC.md` §9.11 как источник маски для aux-loss, но в текущем релизе вызываемым примитивом не является.
 - Нет reader-макросов, property lists, `amb-*`, `defrule`/`query`, `define-compiler-macro` — их место занимают описанные выше аналоги на `:syntax` и макросах.
 
-Источники: `SPEC.md` §9, `src/ns/CODE.md`, `src/stdlib/CODE.md`, `docs/symbolic-engine.md`, `src/stdlib/{symbolic,neuro}.qlsp`; рабочие примеры — `bench/nsif_eager.qlsp`, `bench/nsif_graph.qlsp`, `examples/term.qlsp`. Релизные итоги — CHANGELOG релиза 0.19.15.
+Источники: `SPEC.md` §§9, 11, `src/ns/CODE.md`, `src/stdlib/CODE.md`, `docs/symbolic-engine.md`, `src/stdlib/{symbolic,neuro}.qlsp`; рабочие примеры — `bench/nsif_eager.qlsp`, `bench/nsif_graph.qlsp`, `examples/term.qlsp`; тесты — `src/*_test.zig` (910 тестов). Релизные итоги — CHANGELOG релиза 0.19.16.

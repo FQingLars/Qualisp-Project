@@ -24,38 +24,61 @@ Qualisp — statically typed Lisp. Типы проверяются **до** ис
 | `:func` | функция: код + окружение | `id` |
 | `:struct` | номинальный тип структуры (§4.5, гл. 13) | `(pt 1 2)` |
 
+Среди номинальных структур — `error` и `call-frame` из prelude-модуля `error`:
+их статические типы — `(:struct error)` и `(:struct call-frame)`. Подробности —
+гл. 16.
+
 Аннотации обязательны на верхнем уровне — и для `defvar`, и для параметров и
-возврата `defun`:
+возврата `defun`. Единый вид аннотаций — **dotted pair**: `(x . :fixnum)` —
+параметр, `(field . :fixnum)` — поле структуры, `(expr . :fixnum)` — результат,
+где `expr` — само выражение результата (последняя форма тела); для глобала —
+`(name (value . :type))`. Cdr пары — это тип, поэтому аннотация — данные и
+никогда не принимается за вызов функции.
 
 ```lisp
-(defvar x :fixnum 1)
+(defvar x (1 . :fixnum))
 x               ; → 1
 (setq x 2)      ; тип зафиксирован: можно только :fixnum
 x               ; → 2
 
-(defun sq (x :fixnum) :fixnum (* x x))
+(defun sq ((n . :fixnum)) ((* n n) . :fixnum))
 (sq 7)          ; → 49
 
-(defun add (a :fixnum b :fixnum) :fixnum (+ a b))
+(defun add ((a . :fixnum) (b . :fixnum)) ((+ a b) . :fixnum))
 (add 2 3)       ; → 5
 ```
 
-`&optional` внутри тела имеет тип `(:option T)`, `&rest` — `(:list T)`:
+Старый позиционный вид удалён полностью, режима совместимости нет:
+`(defun sq (x :fixnum) :fixnum (* x x))` даёт
+`defun expects parameters, a result and a body`, а `(defvar y 20)` —
+`defvar expects a name, a typed value and nothing else`. Чекер, загрузчик
+модулей, `defgraph`/`defuse` и `buildDefun` читают только парный вид;
+`defmacro` — исключение (гл. 12).
+
+`&optional` внутри тела имеет тип `(:option T)`, `&rest` — `(:list T)`; маркеры
+остаются, тип пишется внутри пары:
 
 ```lisp
-(defun g (x :fixnum &optional y :fixnum) :fixnum (if (null y) x x))
-(defun rst (a :fixnum &rest xs :fixnum) :fixnum a)
+(defun g ((x . :fixnum) &optional (y . :fixnum)) ((if (null y) x x) . :fixnum))
+(defun rst ((a . :fixnum) &rest (xs . :fixnum)) (a . :fixnum))
 ```
 
 Значения по умолчанию для `&optional` не задаются, форма `(p :type default)` не
 поддерживается. Пустой список — это `nil`, поэтому `(:list T)` непуст, а проверять
 список надо через `(null x)`, не через `(if x …)`.
 
-Сахар `\` и `lambda` тоже аннотируются:
+У `lambda` параметры тоже парные, но результат **выводится** — отдельной
+аннотации результата у `lambda` нет:
 
 ```lisp
-(funcall (lambda (x :fixnum) :fixnum (+ x 1)) 9)   ; → 10
+(funcall (lambda ((v . :fixnum)) (+ v 1)) 9)   ; → 10
 ```
+
+Арифметика n-арная: `(+ 1 2 3 4)` → `10`, `(* 2 3 4)` → `24`,
+`(- 10 3 2)` → `5`; `(- 5)` — унарный минус. `^` — не функция языка, а
+синтаксис символьных термов (`neuro`/`symbolic`): `(^ (+ x 1) 3)` в `term->code`
+разворачивается в `(let ((pow (+ x 1))) (* pow pow pow))`, связывая составное
+основание один раз; в обычном коде `(^ n)` даёт `unknown function ^`.
 
 > 🐍 **Python-аналогия.** Это type hints, только обязательные на границе модуля:
 > ```python
@@ -84,11 +107,15 @@ x               ; → 2
 ## 4.3 Что дают аннотации
 
 1. **Ранние ошибки.** Несовпадение типов ловится до исполнения, вместе со спаном
-   (`file:line:col`). Пример: `(defun f (x :fixnum &optional y :fixnum) :fixnum y)`
+   (`file:line:col`). Пример: `(defun f ((x . :fixnum) &optional (y . :fixnum)) (y . :fixnum))`
    отвергается — тело возвращает `(:option :fixnum)`, а не `:fixnum`.
+   Сама парная запись — данные: dotted-хвост аннотации не считается вызовом при
+   макрораскрытии. Поля структуры требуют `(field . :type)` (диагностика
+   `field must be (name . :type)`), методы трейта — `(name params . :ret)`.
 2. **Оптимизации.** JIT генерирует код под доказанный тип: инлайн
    fixnum-арифметики со guard'ом тега и bail-блоком, быстрый путь для `f32`/`f64`,
-   прямое чтение глобала по `SymbolId`.
+   прямое чтение глобала по `SymbolId`, а с M3a — raw fixnum-локальные в слотах
+   кадра без тега (гл. 5, 20).
 3. **Документация.** Сигнатура — часть текста программы; в модулях она задаёт
    экспортируемый контракт.
 
@@ -111,7 +138,7 @@ error at 1:1: function SQ is already defined (overloading is not supported)
 (неизвестное). Литерал выводит форму, dtype по умолчанию `:f32`:
 
 ```lisp
-(defvar w (:tensor :f32 (2 2)) (param (tensor ((1.0 2.0) (3.0 4.0)))))
+(defvar w ((param (tensor ((1.0 2.0) (3.0 4.0)))) . (:tensor :f32 (2 2))))
 (type-of w)   ; → TENSOR
 ```
 
@@ -130,19 +157,24 @@ error at 1:1: function SQ is already defined (overloading is not supported)
 статический по первому аргументу, без vtable. Подробности — гл. 13.
 
 ```lisp
-(defstruct pt ((x :fixnum) (y :fixnum)))
-(defvar p (:struct pt) (pt 1 2))
+(defstruct pt ((x . :fixnum) (y . :fixnum)))
+(defvar p ((pt 1 2) . (:struct pt)))
 (slot-value p 'x)        ; → 1
 (set-slot p 'x 10)
 (type-of p)              ; → STRUCT
 
-(deftrait showable (show (self :self) :string))
-(defstruct box ((v :fixnum)) (showable))
-(impl box (defun show (self) :string "box"))
-(show (box 3))           ; → "box"
+(deftrait display
+  (show ((self . :self)) . :string))
+(defstruct box ((v . :fixnum)) (display))
+(impl box (defun show (self) ((number-to-string (slot-value self 'v)) . :string)))
+(show (box 3))           ; → "3"
 ```
 
-`defvar` для структуры требует аннотации: `(defvar p (:struct pt) (pt 1 2))`.
+Сигнатура метода трейта — `(name params . :ret)`; `self` в `impl` остаётся
+голым символом, его тип выводится из имени структуры. `defvar` для структуры
+требует аннотации: `(defvar p ((pt 1 2) . (:struct pt)))`. Старый вид
+`(deftrait d (show (self :self) :string))` даёт
+`trait method expects a name, parameters and a result`.
 
 ## 4.6 Интроспекция типов
 
@@ -165,8 +197,8 @@ error at 1:1: function SQ is already defined (overloading is not supported)
 Верхний уровень — только аннотации. Внутри функции — двунаправленная проверка:
 литералы, арифметика, `let`, `lambda`, `if`, вызовы известных функций.
 Полиморфизм — явный через переменные типов `:a`, `:b` (например,
-`(defun identity (x :a) :a x)` в `core`); HM-вывод сигнатур без аннотаций не
-выполняется. Невыводимый локальный тип — отказ компиляции, не `:any`.
+`(defun identity ((x . :a)) (x . :a))` в `core`); HM-вывод сигнатур без
+аннотаций не выполняется. Невыводимый локальный тип — отказ компиляции, не `:any`.
 
 `:syntax` — это конкретное дерево S-выражения, а не «любое значение»:
 
@@ -203,7 +235,9 @@ error at 1:1: function SQ is already defined (overloading is not supported)
 | `t` | `BOOL` | `bool` |
 
 Cons-ячейки сообщаются как `LIST`; единый callable-atom отдаёт `FUNCTION` и для
-замыкания, и для примитива, и для JIT-обёртки.
+замыкания, и для примитива, и для JIT-обёртки. Структуры `error` и `call-frame`
+из prelude-модуля `error` тоже дают `STRUCT`; их статические типы —
+`(:struct error)` и `(:struct call-frame)` (гл. 16).
 
 ## 4.9 Известные ограничения
 
@@ -211,7 +245,11 @@ Cons-ячейки сообщаются как `LIST`; единый callable-atom
   проверку; «вывода по наблюдениям JIT» нет.
 - Пользовательских перегрузок нет; `abs`/`min`/`max` как перегрузки не
   существуют.
-- `&optional` без значений по умолчанию; `(p :type default)` не поддержан.
+- `&optional` без значений по умолчанию; аннотация — `(p . :type)`, форма
+  `(p :type default)` не поддержана.
+- `defmacro` — исключение из единого вида: `(defmacro name (p :syntax) :syntax …)`
+  (гл. 12).
+- `^` работает только в символьных термах; в обычном коде это `unknown function ^`.
 - `lambda`-литерал не вызывается напрямую — используйте `funcall`.
 - `let*` отсутствует: `let` делает параллельные биндинги.
 - Векторных и прочих `#`-литералов (`#(...)`, `#'`, `#| |#`) нет; `#\` задаёт

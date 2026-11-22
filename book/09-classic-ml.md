@@ -8,17 +8,21 @@
 
 Важно понимать границы модуля: `ml` считает **метрики** по спискам и одному 1-D тензору и **готовит данные** (разбиение, масштабирование). Готовых моделей KNN, деревьев решений, случайных лесов, градиентного бустинга, K-Means, а также функций `cross-val-score` / `grid-search` в нём нет: обучение моделей — зона модуля `dl` (гл. 8), а кросс-валидацию и перебор гиперпараметров вы собираете из примитивов сами (§9.10). Экспорты перечислены в конце исходника: `mean`, `mse`, `mae`, `rmse`, `accuracy`, `train-part`, `test-part`, `minmax-scale`, `standardize`, `t-mse`, `precision`, `recall`, `f1`.
 
+В 0.19.16 стандартная библиотека включает 13 модулей: рядом с `ml` работают `error` (загружается в prelude, структурированные ошибки с полем `kind`) и `datetime` (UTC-календарь, ISO-8601 и таймеры, подключается `(import DATETIME)`); их API описаны в гл. 15. Каждая экспортируемая функция каждого модуля — включая все 12 экспортов `ml` — покрыта отдельным тестом; всего в проекте 910 тестов (`zig build test`).
+
 ## 9.1 Утилиты для списков
 
 Базовые обходы списков — примитивы языка, они доступны без импорта и работают с явно типизированными функциями:
 
 ```lisp
-(map (lambda (x :fixnum) :fixnum (* x x)) (list 1 2 3))     ;; → (1 4 9)
-(filter (lambda (x :fixnum) :bool (> x 1)) (list 1 2 3))     ;; → (2 3)
-(reduce (lambda (a :fixnum b :fixnum) :fixnum (+ a b)) (list 1 2 3) 0) ;; → 6
+(map (lambda ((x . :fixnum)) (* x x)) (list 1 2 3))          ;; → (1 4 9)
+(filter (lambda ((x . :fixnum)) (> x 1)) (list 1 2 3))       ;; → (2 3)
+(reduce (lambda ((a . :fixnum) (b . :fixnum)) (+ a b)) (list 1 2 3) 0) ;; → 6
 (take 2 (list 1 2 3))                                        ;; → (1 2)
 (drop 2 (list 1 2 3))                                        ;; → (3)
 ```
+
+У `lambda` параметры аннотируются парой `(имя . :тип)`, а результат выводится — отдельной аннотации результата у `lambda` нет (в отличие от `defun`, где результат — последняя форма тела `(expr . :type)`).
 
 `map`, `filter`, `reduce` — итеративные примитивы: глубина стека не зависит от длины списка, поэтому `(map f xs)` на длинном списке не упирается в кадры вызовов.
 
@@ -31,10 +35,10 @@
 (range 0)          ;; → nil — пустой диапазон
 (sum (list 1 2 3)) ;; → 6
 (unique (list 1 1 2 3 2)) ;; → (1 2 3)
-(zip-with (lambda (a :fixnum b :fixnum) :fixnum (+ a b))
+(zip-with (lambda ((a . :fixnum) (b . :fixnum)) (+ a b))
           (list 1 2) (list 10 20))          ;; → (11 22)
-(find (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))      ;; → 3
-(position (lambda (x :fixnum) :bool (> x 2)) (list 1 2 3))  ;; → 2
+(find (lambda ((x . :fixnum)) (> x 2)) (list 1 2 3))        ;; → 3
+(position (lambda ((x . :fixnum)) (> x 2)) (list 1 2 3))    ;; → 2
 ```
 
 `range` строит список хвостовой рекурсией по `:fixnum` (`range-from` в `collections.qlsp`), а не обходом cons-цепочки. Полный список экспорта `collections`: `sum`, `keep-positive`, `any`, `all`, `count-if`, `last`, `range`, `find`, `position`, `take-while`, `drop-while`, `zip-with`, `member?`, `unique`.
@@ -54,10 +58,10 @@
 Индексный хелпер — типичный пример:
 
 ```lisp
-(defun indices (i :fixnum n :fixnum) (:list :fixnum)
-  (if (< (+ i 1) n)
-      (cons i (indices (+ i 1) n))
-      (list i)))
+(defun indices ((i . :fixnum) (n . :fixnum))
+  ((if (< (+ i 1) n)
+       (cons i (indices (+ i 1) n))
+       (list i)) . (:list :fixnum)))
 
 (indices 0 4)   ;; → (0 1 2 3)
 ```
@@ -95,8 +99,8 @@
 Реализация в `ml.qlsp`:
 
 ```lisp
-(defun t-mse (pred (:tensor :f32 (_)) actual (:tensor :f32 (_))) :flonum
-  (tmean (* (- pred actual) (- pred actual))))
+(defun t-mse ((pred . (:tensor :f32 (_))) (actual . (:tensor :f32 (_))))
+  ((tmean (* (- pred actual) (- pred actual))) . :flonum))
 ```
 
 Вычитание и умножение здесь — elementwise broadcast, `tmean` сворачивает в `:flonum`. Ранг зафиксирован единицей: `_` — wildcard **измерения**, а не ранга, поэтому 2-D тензор в `t-mse` не типизируется. Несовпадение длин ловит тензорное ядро в рантайме.
@@ -182,23 +186,23 @@
 ```lisp
 (import ML)
 
-(defun indices (i :fixnum n :fixnum) (:list :fixnum)
-  (if (< (+ i 1) n) (cons i (indices (+ i 1) n)) (list i)))
+(defun indices ((i . :fixnum) (n . :fixnum))
+  ((if (< (+ i 1) n) (cons i (indices (+ i 1) n)) (list i)) . (:list :fixnum)))
 
-(defun fold-mse (xs (:list :flonum) ys (:list :flonum) k :fixnum fold :fixnum) :flonum
-  (reduce (lambda (i :fixnum acc :flonum)
-            (if (= (mod i k) fold) acc
-              (let ((d (- (nth xs i) (nth ys i)))) (+ acc (* d d)))))
-          (indices 0 (length xs)) 0.0))
+(defun fold-mse ((xs . (:list :flonum)) (ys . (:list :flonum)) (k . :fixnum) (fold . :fixnum))
+  ((reduce (lambda ((i . :fixnum) (acc . :flonum))
+             (if (= (mod i k) fold) acc
+               (let ((d (- (nth xs i) (nth ys i)))) (+ acc (* d d)))))
+           (indices 0 (length xs)) 0.0) . :flonum))
 
-(defun cv-mse (xs (:list :flonum) ys (:list :flonum) k :fixnum) :flonum
-  (/ (reduce (lambda (f :fixnum acc :flonum) (+ acc (fold-mse xs ys k f)))
-             (indices 0 k) 0.0)
-     (* k 1.0)))
+(defun cv-mse ((xs . (:list :flonum)) (ys . (:list :flonum)) (k . :fixnum))
+  ((/ (reduce (lambda ((f . :fixnum) (acc . :flonum)) (+ acc (fold-mse xs ys k f)))
+              (indices 0 k) 0.0)
+      (* k 1.0)) . :flonum))
 
-(defun grid (xs (:list :flonum) ys (:list :flonum) k :fixnum) (:list :flonum)
-  (list (cv-mse xs ys k)
-        (cv-mse (minmax-scale xs) ys k)))
+(defun grid ((xs . (:list :flonum)) (ys . (:list :flonum)) (k . :fixnum))
+  ((list (cv-mse xs ys k)
+         (cv-mse (minmax-scale xs) ys k)) . (:list :flonum)))
 
 (print (indices 0 5))   ;; → (0 1 2 3 4)
 (print (cv-mse (list 1.0 2.0 3.0 4.0) (list 1.5 2.0 3.0 4.5) 2)) ;; → 0.25
@@ -218,11 +222,11 @@
 (import ML)
 (import COLLECTIONS)
 
-(defun evaluate (pred (:list :flonum) y (:list :flonum)) (:list :flonum)
-  (list (mse pred y) (mae pred y) (rmse pred y)))
+(defun evaluate ((pred . (:list :flonum)) (y . (:list :flonum)))
+  ((list (mse pred y) (mae pred y) (rmse pred y)) . (:list :flonum)))
 
-(defun scale-split (xs (:list :flonum) ratio :flonum) (:option (:list :flonum))
-  (train-part (minmax-scale xs) ratio))
+(defun scale-split ((xs . (:list :flonum)) (ratio . :flonum))
+  ((train-part (minmax-scale xs) ratio) . (:option (:list :flonum))))
 
 (print (evaluate (list 1.0 2.0 3.0) (list 1.5 2.0 2.5)))
 ;; → (0.16666666666666666 0.3333333333333333 0.408248290463863)

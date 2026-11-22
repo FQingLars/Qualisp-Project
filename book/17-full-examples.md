@@ -1,10 +1,10 @@
 # Глава 17. Разбор примеров
 
-В этой главе — рабочие примеры из `examples/` и `bench/` репозитория 0.19.15, разобранные построчно, с Python-эквивалентами. Все они проверены бинарём `qualisp-0.19.15-linux-x86_64`: файлы запускаются как `qualisp examples/<file>.qlsp`, фрагменты — через REPL. Имена в Qualisp регистронезависимы и интернируются в верхний регистр (`MATMUL`, `PARAM`, `GRAD!`, `TSET!`), но книга пишет их «как в исходнике», в Lisp-идиоме.
+В этой главе — рабочие примеры из `examples/` и `bench/` репозитория 0.19.16, разобранные построчно, с Python-эквивалентами. Все они проверены бинарём `qualisp-0.19.16-linux-x86_64`: файлы запускаются как `qualisp examples/<file>.qlsp`, фрагменты — через REPL. Имена в Qualisp регистронезависимы и интернируются в верхний регистр (`MATMUL`, `PARAM`, `GRAD!`, `TSET!`), но книга пишет их «как в исходнике», в Lisp-идиоме.
 
 Два контракта, которые видны в примерах и часто спотыкают новичков:
 
-- **Статическая типизация обязательна.** `defun`/`lambda` требуют типов параметров и возврата, `defvar` требует тип: `(defvar w (:tensor :f32 (2 2)) (param …))`. Вывод типов локальный, `:any` запрещён.
+- **Статическая типизация обязательна.** `defun`/`defgraph` требуют парных аннотаций параметров и результата — `(x . :fixnum)` и `(expr . :fixnum)` (результат — **последняя форма тела**), `defvar` требует `(имя (значение . :тип))`: `(defvar w ((param …) . (:tensor :f32 (2 2))))`. У `lambda` аннотируются только параметры. Вывод типов локальный, `:any` запрещён; старый позиционный вид полностью удалён, совместимости нет. Исключение — `defmacro`, где параметры остаются позиционными `:syntax`-состояниями.
 - **`print` принимает ровно один аргумент.** Чтобы напечатать несколько значений, склеивайте их сами: `(print (strcat "epoch " (to-string iter)))`. Файловый раннер не печатает результат последней формы.
 
 Третий контракт — из устройства autograd: `grad!` заполняет `grad-of` для `param` и **возвращает `nil`**; веса обновляются на месте `tset!`, а не переприсваиванием результата шага оптимизатора (у `sgd-step`/`adam-step` wildcard-форма `(_ _)`).
@@ -17,29 +17,29 @@
 
 ```lisp
 ;; ----- данные: 8 точек, форма (8 1) -----
-(defvar xs (:tensor :f32 (8 1)) (tensor ((1.0) (2.0) (3.0) (4.0)
-                                         (5.0) (6.0) (7.0) (8.0))))
-(defvar ys (:tensor :f32 (8 1)) (tensor ((3.1) (4.9) (7.2) (9.1)
-                                         (10.8) (13.2) (14.9) (17.1))))
+(defvar xs ((tensor ((1.0) (2.0) (3.0) (4.0)
+                     (5.0) (6.0) (7.0) (8.0))) . (:tensor :f32 (8 1))))
+(defvar ys ((tensor ((3.1) (4.9) (7.2) (9.1)
+                     (10.8) (13.2) (14.9) (17.1))) . (:tensor :f32 (8 1))))
 
 ;; ----- параметры: всё, что трассировщик видит как глобал, константа без градиента -----
-(defvar w (:tensor :f32 (1 1)) (param (tensor ((0.0)))))
-(defvar b (:tensor :f32 (1 1)) (param (tensor ((0.0)))))
+(defvar w ((param (tensor ((0.0)))) . (:tensor :f32 (1 1))))
+(defvar b ((param (tensor ((0.0)))) . (:tensor :f32 (1 1))))
 
 ;; ----- loss-граф: скаляр :flonum -----
-(defgraph loss (x (:tensor :f32 (8 1)) y (:tensor :f32 (8 1))
-                  w (:tensor :f32 (1 1)) b (:tensor :f32 (1 1))) :flonum
-  (let ((d (- (+ (matmul x w) b) y)))
-    (tmean (* d d))))
+(defgraph loss ((x . (:tensor :f32 (8 1))) (y . (:tensor :f32 (8 1)))
+                (w . (:tensor :f32 (1 1))) (b . (:tensor :f32 (1 1))))
+  ((let ((d (- (+ (matmul x w) b) y)))
+     (tmean (* d d))) . :flonum))
 
 ;; ----- отдельный forward-граф для инференса -----
-(defgraph predict (x (:tensor :f32 (8 1)) w (:tensor :f32 (1 1))
-                     b (:tensor :f32 (1 1))) (:tensor :f32 (8 1))
-  (+ (matmul x w) b))
+(defgraph predict ((x . (:tensor :f32 (8 1))) (w . (:tensor :f32 (1 1)))
+                   (b . (:tensor :f32 (1 1))))
+  ((+ (matmul x w) b) . (:tensor :f32 (8 1))))
 
 ;; ----- обучение: while + in-place tset! -----
-(defvar lr :flonum 0.02)
-(defvar epoch :fixnum 0)
+(defvar lr (0.02 . :flonum))
+(defvar epoch (0 . :fixnum))
 (while (< epoch 200)
   (grad! (loss xs ys w b))
   (tset! w 0 0 (- (tref w 0 0) (* lr (tref (grad-of w) 0 0))))
@@ -63,7 +63,7 @@
 | `defgraph predict` | отдельный граф без параметра-цели | `compiled = torch.compile(lambda x: x@w+b)` |
 | `(predict xs w b)` | нативный инференс по графу | `compiled(xs)` |
 
-Тензоры-константы записаны как `(tensor ((2.0)))` — скаляр в форме `[1,1]`: broadcast в 0.19.15 считается elementwise, и форма здесь фиксирована заранее. `tref`/`tset!` **не поддерживаются внутри `defgraph`** — они остаются в теле цикла над графом.
+Тензоры-константы записаны как `(tensor ((2.0)))` — скаляр в форме `[1,1]`: broadcast в 0.19.16 считается elementwise, и форма здесь фиксирована заранее. `tref`/`tset!` **не поддерживаются внутри `defgraph`** — они остаются в теле цикла над графом.
 
 ### Python-эквивалент (PyTorch)
 
@@ -105,28 +105,25 @@ print((xs @ w + b)[0].item(), (xs @ w + b)[7].item())
 ; There is no in-place optimizer yet, so each update is an explicit `tset!`
 ; on the stable parameter tensor.
 
-(defvar x   (:tensor :f32 (4 2)) (tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))))
-(defvar tgt (:tensor :f32 (4 1)) (tensor ((0.0) (1.0) (1.0) (0.0))))
+(defvar x   ((tensor ((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0))) . (:tensor :f32 (4 2))))
+(defvar tgt ((tensor ((0.0) (1.0) (1.0) (0.0))) . (:tensor :f32 (4 1))))
 
-(defvar w1 (:tensor :f32 (2 3)) (param (tensor ((0.5 -0.4 0.3) (-0.2 0.6 -0.5)))))
-(defvar b1 (:tensor :f32 (3))   (param (tensor (0.1 -0.1 0.0))))
-(defvar w2 (:tensor :f32 (3 1)) (param (tensor ((0.7) (-0.8) (0.9)))))
-(defvar b2 (:tensor :f32 (1))   (param (tensor (0.0))))
+(defvar w1 ((param (tensor ((0.5 -0.4 0.3) (-0.2 0.6 -0.5)))) . (:tensor :f32 (2 3))))
+(defvar b1 ((param (tensor (0.1 -0.1 0.0))) . (:tensor :f32 (3))))
+(defvar w2 ((param (tensor ((0.7) (-0.8) (0.9)))) . (:tensor :f32 (3 1))))
+(defvar b2 ((param (tensor (0.0))) . (:tensor :f32 (1))))
 
-(defgraph xor-loss (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
-                    w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1)) tgt (:tensor :f32 (4 1)))
-                   :flonum
-  (let ((h (tanh (+ (matmul x w1) b1))))
-    (let ((p (+ (matmul h w2) b2)))
-      (let ((d (- p tgt)))
-        (tmean (* d d))))))
+(defgraph xor-loss ((x . (:tensor :f32 (4 2))) (w1 . (:tensor :f32 (2 3))) (b1 . (:tensor :f32 (3))) (w2 . (:tensor :f32 (3 1))) (b2 . (:tensor :f32 (1))) (tgt . (:tensor :f32 (4 1))))
+  ((let ((h (tanh (+ (matmul x w1) b1))))
+     (let ((p (+ (matmul h w2) b2)))
+       (let ((d (- p tgt)))
+         (tmean (* d d))))) . :flonum))
 
-(defgraph xor-predict (x (:tensor :f32 (4 2)) w1 (:tensor :f32 (2 3)) b1 (:tensor :f32 (3))
-                       w2 (:tensor :f32 (3 1)) b2 (:tensor :f32 (1))) (:tensor :f32 (4 1))
-  (+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2))
+(defgraph xor-predict ((x . (:tensor :f32 (4 2))) (w1 . (:tensor :f32 (2 3))) (b1 . (:tensor :f32 (3))) (w2 . (:tensor :f32 (3 1))) (b2 . (:tensor :f32 (1))))
+  ((+ (matmul (tanh (+ (matmul x w1) b1)) w2) b2) . (:tensor :f32 (4 1))))
 
-(defvar lr :flonum 0.5)
-(defvar epoch :fixnum 0)
+(defvar lr (0.5 . :flonum))
+(defvar epoch (0 . :fixnum))
 
 (while (< epoch 5000)
   (grad! (xor-loss x w1 b1 w2 b2 tgt))
@@ -147,14 +144,28 @@ print((xs @ w + b)[0].item(), (xs @ w + b)[7].item())
 
 (print (xor-loss x w1 b1 w2 b2 tgt))
 
-(defvar y (:tensor :f32 (4 1)) (xor-predict x w1 b1 w2 b2))
+(defvar y ((xor-predict x w1 b1 w2 b2) . (:tensor :f32 (4 1))))
 (print (tref y 0 0))
 (print (tref y 1 0))
 (print (tref y 2 0))
 (print (tref y 3 0))
+
+(print (tref w1 0 0))   ; далее — веса, как в examples/xor.qlsp
+(print (tref w1 0 1))
+(print (tref w1 0 2))
+(print (tref w1 1 0))
+(print (tref w1 1 1))
+(print (tref w1 1 2))
+(print (tref b1 0))
+(print (tref b1 1))
+(print (tref b1 2))
+(print (tref w2 0 0))
+(print (tref w2 1 0))
+(print (tref w2 2 0))
+(print (tref b2 0))
 ```
 
-Вывод (проверен): `1.9630519432212168e-11` — loss; предсказания `4.35e-6`, `1.0000051`, `1.0000033`, `4.71e-6` — XOR выучен.
+Вывод (проверен бинарём 0.19.16): `1.9630519432212168e-11` — loss; предсказания `4.35e-6`, `1.0000051`, `1.0000033`, `4.71e-6` — XOR выучен; дальше идут веса (`1.6469`, `-1.7026`, `0.1419`, …).
 
 ### Что здесь важно
 
@@ -202,8 +213,8 @@ print((torch.tanh(x @ w1 + b1) @ w2 + b2).flatten().tolist())
 3. **defuse.** Явный fused-кернел собирается в один x86-64 цикл:
 
    ```lisp
-   (defuse affine (x (:tensor :f32 (4)) a :flonum b :flonum) (:tensor :f32 (4))
-     (relu (+ (* x a) b)))
+   (defuse affine ((x . (:tensor :f32 (4))) (a . :flonum) (b . :flonum))
+     ((relu (+ (* x a) b)) . (:tensor :f32 (4))))
 
    (affine (tensor (1.0 -1.0 2.0 -2.0)) 2.0 1.0)
    ```
@@ -228,23 +239,22 @@ NS-логика — не булевы предикаты, а непрерывн�
 ### ns-if в скомпилированном графе (уменьшенный вариант bench/nsif_graph.qlsp, проверен)
 
 ```lisp
-(defgraph route (p (:tensor :f32 (16384 8)) a0 (:tensor :f32 (16384))
-                 a1 (:tensor :f32 (16384)) a2 (:tensor :f32 (16384)))
-                (:tensor :f32 (16384 8))
-  (ns-if (:payload p) (:eps 0.02)
-    ((ns-grt a0 0) (lambda (v (:tensor :f32 (16384 8))) (* v v)))
+(defgraph route ((p . (:tensor :f32 (16384 8))) (a0 . (:tensor :f32 (16384)))
+                 (a1 . (:tensor :f32 (16384))) (a2 . (:tensor :f32 (16384))))
+  ((ns-if (:payload p) (:eps 0.02)
+    ((ns-grt a0 0) (lambda ((v . (:tensor :f32 (16384 8)))) (* v v)))
     ((ns-and (ns-lss a0 0) (ns-grt a1 0))
-     (lambda (v (:tensor :f32 (16384 8))) (* v 3.0)))
+     (lambda ((v . (:tensor :f32 (16384 8)))) (* v 3.0)))
     ((ns-and (ns-lss a0 0) (ns-lss a1 0) (ns-grt a2 0))
-     (lambda (v (:tensor :f32 (16384 8))) (* v 5.0)))
+     (lambda ((v . (:tensor :f32 (16384 8)))) (* v 5.0)))
     ((ns-and (ns-lss a0 0) (ns-lss a1 0) (ns-lss a2 0))
-     (lambda (v (:tensor :f32 (16384 8))) (* v 7.0)))
-    (else (lambda (v (:tensor :f32 (16384 8))) (* v 11.0)))))
+     (lambda ((v . (:tensor :f32 (16384 8)))) (* v 7.0)))
+    (else (lambda ((v . (:tensor :f32 (16384 8)))) (* v 11.0)))) . (:tensor :f32 (16384 8))))
 
-(defvar pp (:tensor :f32 (16384 8)) (param (randn :f32 (16384 8))))
-(defvar a0 (:tensor :f32 (16384)) (randn :f32 (16384)))
-(defvar a1 (:tensor :f32 (16384)) (randn :f32 (16384)))
-(defvar a2 (:tensor :f32 (16384)) (randn :f32 (16384)))
+(defvar pp ((param (randn :f32 (16384 8))) . (:tensor :f32 (16384 8))))
+(defvar a0 ((randn :f32 (16384)) . (:tensor :f32 (16384))))
+(defvar a1 ((randn :f32 (16384)) . (:tensor :f32 (16384))))
+(defvar a2 ((randn :f32 (16384)) . (:tensor :f32 (16384))))
 
 (print (tsum (route pp a0 a1 a2)))
 (grad! (route pp a0 a1 a2))
@@ -264,6 +274,10 @@ Eager-вариант из `bench/nsif_eager.qlsp` отличается толь�
 | `bench/matmul.qlsp` | 100 × `matmul` 128×128 | i-k-j + AVX2, пул компиляции графа |
 | `bench/nsif_eager.qlsp` | 65536×8, 4 ведра + boundary, 20 проходов | eager-роутер |
 | `bench/nsif_graph.qlsp` | 16384×8, forward + backward в графе | `Op.ns_if` и backward по исполненной ветке |
+
+В 0.19.16 часть ядер идёт через `kernel_pool` — отдельный пул вычислительных потоков, не путать с пулом компиляции HLO. Потоки создаются лениво на первом достаточно большом вызове (`max(1, min(cpu-1, 8))`), у воркеров нет `Runtime`: вызывающий выделяет буферы и раздаёт непересекающиеся диапазоны. Параллелятся `elementwise`/`map`, `matmul` (по строкам результата), `reshape`/`transpose`, `tsum`/`tmean` (8 полос с фиксированным порядком сведения — результат побайтово совпадает с последовательным), а в NS — `fillBand`, выбор ветки, counting-sort, `gather`/`scatter`. `max`, `softmax`, `argmax` и `reduceToShape` остаются последовательными. Переменная `QUALISP_SERIAL=1` отключает пул полностью.
+
+Замер A/B (ReleaseFast, 16 ядер, min из 11): matmul 15.9 → 7.6 мс (**2.10×**), ns-if eager 84.9 → 79.0 мс, graph 59.9 → 60.4 мс, reduce 5.1 → 5.7 мс, fib без изменений. Остаток одной нити в ns-if — сами branch-лямбды (4 ветки). Тесты `src/parallel_test.zig` сверяют parallel/serial побайтово.
 
 > 🐍 `ns-if` ≈ `torch.where`, но с жёстким выбором ветви на строку и без смешивания: это скорее `np.select` с проверкой полноты покрытия (ROBDD), у которого есть настоящий backward по выбранной ветке.
 
@@ -303,40 +317,53 @@ lena
 (import neuro)
 (import symbolic)
 
-(defvar xs (:tensor :f32 (4)) (tensor (0.5 1.0 1.5 2.0)))
-(defvar ys (:tensor :f32 (4)) (tensor (0.5 2.0 4.5 8.0)))
+(defvar xs ((tensor (0.5 1.0 1.5 2.0)) . (:tensor :f32 (4))))
+(defvar ys ((tensor (0.5 2.0 4.5 8.0)) . (:tensor :f32 (4))))
 
 ;; `param` — тензор, для которого `grad!` заполнит `grad-of`.
-(defvar c (:tensor :f32 (1)) (param (tensor (0.5))))
-(defvar lr :flonum 0.05)
+(defvar c ((param (tensor (0.5))) . (:tensor :f32 (1))))
+(defvar lr (0.05 . :flonum))
 
 ;; Потеря — тот же терм, что и модель: (c*x^2 - y)^2, среднее по точкам.
-(defgraph loss (c (:tensor :f32 (1)) x (:tensor :f32 (4)) y (:tensor :f32 (4))) :flonum
-  (term '(tmean (* (- (* c (* x x)) y) (- (* c (* x x)) y))) '(c x y)))
+(defgraph loss ((c . (:tensor :f32 (1))) (x . (:tensor :f32 (4))) (y . (:tensor :f32 (4))))
+  ((term '(tmean (* (- (* c (* x x)) y) (- (* c (* x x)) y))) '(c x y)) . :flonum))
 
-(defvar epoch :fixnum 0)
+(defvar epoch (0 . :fixnum))
 (while (< epoch 200)
   (grad! (loss c xs ys))
   (tset! c 0 (- (tref c 0) (* lr (tref (grad-of c) 0))))
   (setq epoch (+ epoch 1)))
 
-(print (tref c 0)) ; → 2.0
+(print (tref c 0)) ; 2.0
 
 ;; Аналитический градиент c*x^2 по c — это x^2; `diff` строит его как терм.
-(print (diff '(* c (* x x)) 'c)) ; → (* X X)
+(print (diff '(* c (* x x)) 'c)) ; (* X X)
 
 ;; Тот же градиент двумя путями: autograd и скомпилированный терм.
-(defgraph sum-sq (c (:tensor :f32 (1)) x (:tensor :f32 (4))) :flonum
-  (term '(tsum (* c (* x x))) '(c x)))
-(defgraph slope-sq (x (:tensor :f32 (4))) :flonum
-  (term '(tsum (* x x)) '(x)))
+(defgraph sum-sq ((c . (:tensor :f32 (1))) (x . (:tensor :f32 (4))))
+  ((term '(tsum (* c (* x x))) '(c x)) . :flonum))
+(defgraph slope-sq ((x . (:tensor :f32 (4))))
+  ((term '(tsum (* x x)) '(x)) . :flonum))
 
 (grad! (sum-sq c xs))
-(print (tref (grad-of c) 0)) ; → 7.5
-(print (slope-sq xs))        ; → 7.5
+(print (tref (grad-of c) 0)) ; 7.5
+(print (slope-sq xs))        ; 7.5
 ```
 
-Вывод (проверен): `2.0`, `(* X X)`, `7.5`, `7.5` — аналитический градиент и autograd совпадают.
+Вывод (проверен бинарём 0.19.16): `2.0`, `(* X X)`, `7.5`, `7.5` — аналитический градиент и autograd совпадают.
+
+Терм умеет и новое: `term->code` транслирует `reshape`/`reshape-like`/`transpose`/`ones-like`/`tmax-mask`/`relu-mask`/`softmax`, а `^ n` над составным основанием связывает подтерм один раз через `let`:
+
+```lisp
+(import neuro)
+(import symbolic)
+(grad '(tsum x) 'x)                      ; → (ONES-LIKE X)
+(grad '(tsum (relu x)) 'x)               ; → (* (ONES-LIKE (RELU X)) (RELU-MASK X))
+(write-to-string (term->code '(^ (+ x 1) 3) '(x)))
+;; → "(LET ((POW-0 (+ X 1))) (* POW-0 POW-0 POW-0))"
+```
+
+`grad` даёт градиент скалярного лосса `(tsum term)` — в отличие от поэлементного `diff`; результат проходит `simplify`, но маски и `ones-like` остаются отдельными операциями.
 
 | Приём | Что происходит | Python |
 |---|---|---|
@@ -346,3 +373,79 @@ lena
 | `grad!`/`grad-of` | автодифференцирование графа | `loss.backward()` + `.grad` |
 
 > 🐍 Это мост `sympy → torch` без текстогенерации на стороне пользователя: терм остаётся S-выражением, а раскрытие происходит на этапе макроexpand, до проверки типов.
+
+## 17.7 examples/error-demo.qlsp — структурированные ошибки
+
+Демо показывает сообщение, категорию, причину и трейс пойманной ошибки. `error` — prelude, поэтому `(import error)` здесь не нужен. Файл дословно из `examples/error-demo.qlsp` (проверен бинарём 0.19.16):
+
+```lisp
+; Демо структурированных ошибок и трассировки.
+;
+;   ./zig-out/bin/qualisp examples/error-demo.qlsp
+;
+; Хвостовые вызовы сворачиваются в один кадр (см. P5v), поэтому middle/outer
+; ниже намеренно не хвостовые — так в трейсе видно несколько кадров.
+; Закомментируй catch-error и вызови (outer) напрямую, чтобы увидеть
+; позицию ошибки в terminal: file:line:col: boom.
+
+(defun inner ((x . :fixnum))
+  ((throw 42) . :never))
+(defun middle ((x . :fixnum))
+  ((let ((r (inner x))) r) . :never))
+(defun outer ()
+  ((let ((r (middle 1))) r) . :never))
+
+(defvar e ((result-error (catch-error (lambda () (outer)))) . (:struct error)))
+
+(print "=== сообщение ===")
+(print (error-message e))
+(print "=== категория ===")
+(print (error-kind e))
+(print "=== причина (cause) ===")
+(print (error-cause e))
+(print "=== трейс ===")
+(print (format-error e))
+```
+
+Вывод (проверен: `qualisp examples/error-demo.qlsp`, exit 0):
+
+```text
+=== сообщение ===
+42
+=== категория ===
+USER
+=== причина (cause) ===
+42
+=== трейс ===
+Error: 42 (user)
+  at OUTER
+  at MIDDLE  examples/error-demo.qlsp:15  in (MIDDLE 1)
+  at INNER  examples/error-demo.qlsp:13  in (INNER X)
+```
+
+`(throw 42)` даёт `kind = 'user`, `message = "42"` и `cause = 42`; `format-error` печатает кадры от oldest к newest, а тег ошибки `ERROR::ERROR` в отчёт не попадает. У кадра `OUTER` нет места в source map, поэтому он напечатан без `<unknown>:0` — только имя. Если убрать `catch-error` и вызвать `(outer)` напрямую, раннер покажет позицию броска в формате `file:line:col: 42` (в пробе — `unhandled.qlsp:2:31: 42`) и `error: RuntimeError` с exit 1.
+
+## 17.8 examples/lsp-demo.qlsp — демо для редактора
+
+Демо для VSCodium/VS Code: оно не печатает ничего интересного (`12`), зато показывает навигацию и диагностику. Файл дословно из `examples/lsp-demo.qlsp`:
+
+```lisp
+; Демо LSP. Откройте файл в VSCodium после `bash tools/lsp/build.sh`.
+;
+;  1. Наведите курсор на add-pair в последней форме — hover покажет тип.
+;  2. Ctrl+Click (F12) по add-pair — переход к определению.
+;  3. Откройте панель Outline — видны defun и defvar.
+;  4. Замените (x . :fixnum) на (x :fixnum) — появится красная диагностика,
+;     потому что старый позиционный вид удалён полностью.
+
+(defun add-pair ((x . :fixnum) (y . :fixnum))
+  ((+ x y) . :fixnum))
+
+(defvar limit (10 . :fixnum))
+
+(print (add-pair 2 limit))
+```
+
+Проверенный вывод раннера: `12`. hover показывает статический тип и исходную форму определения с комментарием над ней, definition по `defun`/`defvar` работает в пределах файла и по зарегистрированным `.qlsp` воркспейса, Outline строится по верхним формам, completion включает локальные имена и экспорты stdlib. Замена `(x . :fixnum)` на `(x :fixnum)` даёт диагностику `defun expects parameters, a result and a body`.
+
+Сервер и расширение собираются **локально**: `bash tools/lsp/build.sh`, затем установка `python3 editors/vscode/package-vsix.py` и `codium --install-extension zig-out/qualisp.vsix --force`. Готового `qualisp-lsp` и VSIX в релизных ассетах 0.19.16 нет (гл. 16.7).
