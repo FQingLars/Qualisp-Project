@@ -1,6 +1,6 @@
 # Глава 15. Стандартная библиотека
 
-Стандартная библиотека Qualisp 0.19.16 — это **13 модулей**, написанных на самом Qualisp и вшитых в бинарник через `@embedFile` (`src/stdlib.zig`). Никакой внешней среды с `pip`-пакетами: всё, что нужно программе, уже лежит в исполняемом файле. `core` и `error` грузятся при старте как **prelude**, остальные модули подключаются **лениво** при первом `import`; повторный импорт идемпотентен. Порядок `base_modules` фиксирован: `core`, `error`, `string`, `collections`, `test`, `ml`, `dl`, `symbolic`, `argparse`, `tablet`, `io`, `datetime`, `neuro` (`src/stdlib.zig`). `Session.loadPrelude` грузит и импортирует ровно `core` и `error` (`src/session.zig`).
+Стандартная библиотека Qualisp 0.19.20 — это **13 модулей**, написанных на самом Qualisp. В обычной сборке они вшиты в бинарник через `@embedFile` (`src/stdlib.zig`); edge-профиль `-Dembed-stdlib=false` оставляет в бинаре только bootstrap `core`+`error`, а остальные 11 модулей читает из `stdlib.qlsl`. Бинарные ассеты 0.19.20 собраны именно в edge-профиле, поэтому для них нужен пакет из wheel (гл. 2.1). Никакой внешней среды с `pip`-пакетами: всё, что нужно программе, лежит в исполняемом файле или рядом в `.qlsl`; каталоги поиска задаются `--path`/`QUALISP_PATH`, а `qualisp.lock` фиксирует SHA-256 и версии пакетов. `core` и `error` грузятся при старте как **prelude**, остальные модули подключаются **лениво** при первом `import`; повторный импорт идемпотентен. Порядок `base_modules` фиксирован: `core`, `error`, `string`, `collections`, `test`, `ml`, `dl`, `symbolic`, `argparse`, `tablet`, `io`, `datetime`, `neuro` (`src/stdlib.zig`). `Session.loadPrelude` грузит и импортирует ровно `core` и `error` (`src/session.zig`).
 
 | Модуль | Файл | Экспорты | Содержание | Python-аналог |
 |---|---|---|---|---|
@@ -11,7 +11,7 @@
 | `test` | `src/stdlib/test.qlsp` | 2 | `assert-fixnum`, `assert-string` — аварийные утверждения | `assert` / `pytest` |
 | `io` | `src/stdlib/io.qlsp` | 4 | файлы, построчное чтение, потоковые хэндлы, макрос `with-file` | `open`, `pathlib` |
 | `ml` | `src/stdlib/ml.qlsp` | 13 | метрики, разбиение выборки, масштабирование, `t-mse` | `sklearn.metrics` + `sklearn.preprocessing` |
-| `dl` | `src/stdlib/dl.qlsp` | 17 | логиты слоёв, MSE, SGD/Adam/momentum, замкнутый шаг линейной регрессии | `torch.nn` + `torch.optim` |
+| `dl` | `src/stdlib/dl.qlsp` | 36 | слои, потери, метрики, init, dropout, conv/pool, attention, embedding, SGD/Adam/momentum | `torch.nn` + `torch.optim` |
 | `symbolic` | `src/stdlib/symbolic.qlsp` | 17 | сопоставление, переписывание, упрощение, `diff`, `grad`, `unify`, полиномы | `sympy` |
 | `argparse` | `src/stdlib/argparse.qlsp` | 4 | сканер аргументов: `flag?`, `option-value`, `require-option`, `positionals` | `argparse` (сканирование) |
 | `tablet` | `src/stdlib/tablet.qlsp` | 2 | числовая таблица: `defstruct` + `deftrait`/`impl`, методы на `:f32` | `pandas.DataFrame` |
@@ -20,9 +20,9 @@
 
 Есть ещё **`src/stdlib/probe.qlsp`** и **`src/stdlib/typepairs_probe.qlsp`** — test-only фикстуры: они вшиваются только в test-сборки (`builtin.is_test`) и **не являются модулями для пользователя**. Модулей ровно тринадцать.
 
-> 🐍 «13 вшитых модулей в одном бинарнике» — это монолитный Docker-образ с предустановленными `numpy/torch/sklearn/pandas/sympy`, только без GIL, без 4 ГБ зависимостей и без `pip install`.
+> 🐍 «13 модулей в одном бинарнике» — это монолитный Docker-образ с предустановленными `numpy/torch/sklearn/pandas/sympy`, только без GIL, без 4 ГБ зависимостей и без `pip install`. Edge-профиль — тот же образ, но stdlib вынесена в отдельный `.qlsl`-архив.
 
-Модули `audio`, `async`, `ns`, `pkg` и менеджер `qvalent` в исходниках отсутствуют. LSP (`libqualisplsp`, Rust-сервер `qualisp-lsp`, расширение для VSCodium) есть **в исходниках**, но его бинарник и VSIX в релизные ассеты не входят (гл. 16.7). Вместо тестового фреймворка `deftest`/`run-tests` есть только `assert-*`, падающие через `throw`; прогон — внешний (`zig build test`).
+Модули `audio`, `async`, `ns`, `pkg` и менеджер `qvalent` в исходниках отсутствуют. Пакетного реестра тоже нет, но есть формат `.qlsl` и упаковщик `qualisp-pack` (`zig build pack`): `stdlib.qlsl` собирается из `src/stdlib/manifest.qlsp`; `import` ищет модуль сначала среди встроенных, затем в подключённых пакетах (`--package`, `--path`, `QUALISP_PATH`). Для воспроизводимого окружения `qualisp-pack lock` пишет `qualisp.lock`, а `--lock`/`QUALISP_LOCK` проверяют хэши, имена и версии до применения. LSP (`libqualisplsp`, Rust-сервер `qualisp-lsp`, расширение для VSCodium) есть **в исходниках**, но его бинарник и VSIX в релизные ассеты не входят (гл. 16.7). Вместо тестового фреймворка `deftest`/`run-tests` есть только `assert-*`, падающие через `throw`; прогон — внешний (`zig build test`).
 
 ## 15.1 core и error — всегда загружены
 
@@ -126,7 +126,7 @@
   (if (null line) nil (funcall f (or-else line ""))))
 ```
 
-CSV, regex и аудио в stdlib 0.19.16 **не входят**: для разбора строк используйте `string-split`/`substr`, для данных — `tablet`. Дата и время теперь есть — это модуль `datetime` (§15.18). Вызов `with-file` не менялся: `defmacro` — единственное место, где параметры по-прежнему записываются позиционно (гл. 12).
+CSV, regex и аудио в stdlib 0.19.20 **не входят**: для разбора строк используйте `string-split`/`substr`, для данных — `tablet`. Дата и время теперь есть — это модуль `datetime` (§15.18). Вызов `with-file` не менялся: `defmacro` — единственное место, где параметры по-прежнему записываются позиционно (гл. 12).
 
 > 🐍 `with-file` ≈ `with open(path, mode) as f:`, только это макрос, раскрывающийся в `let` + `catch-error`, а не контекстный менеджер рантайма.
 
@@ -178,7 +178,7 @@ CSV, regex и аудио в stdlib 0.19.16 **не входят**: для раз�
 
 > 🐍 `assert-fixnum` ≈ `assert a == b, f"expected {b}, got {a}"`; `run-tests`/`pytest` в релизе нет, прогон тестов — внешний (`zig build test`).
 
-В 0.19.16 тесты есть **на каждую экспортируемую функцию** `tablet`, `ml`, `dl`, `symbolic`, `neuro`, `argparse`, `io`, `string`, `collections`. Всего `zig build test` прогоняет **910 тестов** (909 именных `test "…"` плюс один анонимный блок в `src/tests.zig`) на Linux и Windows.
+В 0.19.20 тесты есть **на каждую экспортируемую функцию** `tablet`, `ml`, `dl`, `symbolic`, `neuro`, `argparse`, `io`, `string`, `collections`. Всего `zig build test` прогоняет **1095 тестов** (1094 именных `test "…"` плюс один анонимный блок в `src/tests.zig`) на Linux и Windows.
 
 ## 15.6 ml — метрики и подготовка данных
 
@@ -215,13 +215,18 @@ CSV, regex и аудио в stdlib 0.19.16 **не входят**: для раз�
 
 ## 15.7 dl — слои и оптимизаторы
 
-17 экспортов, все чистые: переданные тензоры не мутируются, результат — новый тензор или структура. Работает только `:f32`, только 2-D `batch × features`; bias — строка `(1 m)`, а не вектор `(m)`.
+36 экспортов. Почти все функции чистые: переданные тензоры не мутируются, результат — новый тензор или структура. Исключения — `sgd-update!`/`adam-update!`: они меняют stable-тензор и состояние на месте. Работает только `:f32`; ранг частично полиморфен — потери и состояние оптимизатора принимают `(:tensor :f32 :any)`, слои с фиксированной формой результата требуют конкретный ранг. Bias — строка `(1 m)`, а не вектор `(m)`.
 
 | Группа | Экспорты | Что делает |
 |---|---|---|
 | Прямой ход | `linear-forward`, `mlp-forward` | логиты, активация — выбор вызывающего |
-| Потери | `mse-loss`, `squared-error` | скалярная MSE по тензору / по числу |
-| Оптимизаторы | `sgd-step`, `adam-init`, `adam-step`, `adam-param`, `adam-steps`, `momentum-init`, `momentum-step`, `momentum-param` | SGD, Adam (β₁=0.9, β₂=0.999, eps=1e-7, bias correction), momentum |
+| Нормализация и внимание | `layernorm`, `scaled-dot-attention`, `embedding-lookup` | LayerNorm, attention `[B,T,d]`, выборка строк `:i64`-индексами |
+| Свёртки и pooling | `conv2d-forward` | `[N,C,H,W]` × `[O,C,KH,KW]`, bias `[O,1,1]`, stride/pad; pooling — примитивы `t-max-pool2d`/`t-avg-pool2d` |
+| Dropout | `dropout`, `apply-mask` | eager inverted dropout; traceable-вариант с готовой маской |
+| Потери и метрики | `mse-loss`, `squared-error`, `mae-loss`, `cross-entropy`, `cross-entropy-labels`, `accuracy-labels` | MSE/MAE, CE по логитам/меткам, accuracy |
+| Инициализация | `init-weights`, `init-bias`, `glorot-scale`, `he-scale` | runtime-формы `(list n m)`, множитель к `randn` |
+| Оптимизаторы | `sgd-step`, `sgd-update!`, `adam-init`, `adam-step`, `adam-param`, `adam-steps`, `adam-update!`, `momentum-init`, `momentum-step`, `momentum-param` | SGD, Adam (β₁=0.9, β₂=0.999, eps=1e-7, bias correction), momentum; `*update!` — in-place |
+| Расписание и клип | `clip-by-norm`, `lr-decay` | clip по норме, шаг learning rate |
 | Без графа | `linear-grads`, `linear-regression-step` | замкнутый градиент линейной регрессии через `matmul`/`transpose`/`tsum` |
 | Структуры | `adam-state`, `linear-gradients`, `linear-model`, `momentum-state` | состояние в `defstruct` |
 
@@ -239,11 +244,11 @@ CSV, regex и аудио в stdlib 0.19.16 **не входят**: для раз�
 (print (adam-steps st))                       ; → 1
 ```
 
-Пример проверен бинарём 0.19.16. Обратите внимание на формы: `linear-forward` считает `xW + b`, поэтому веса `w` имеют форму `(2 2)` при входе `(1 2)`, а градиент для `adam-step` должен совпадать с формой весов.
+Пример проверен бинарём 0.19.20. Обратите внимание на формы: `linear-forward` считает `xW + b`, поэтому веса `w` имеют форму `(2 2)` при входе `(1 2)`, а градиент для `adam-step` должен совпадать с формой весов.
 
-В autograd-цикле веса обновляются **на месте** `tset!` по `(grad-of w)`, а не `sgd-step`: результат шага имеет wildcard-форму `(_ _)` и не присваивается конкретной форме `(2 1)` (см. гл. 17). Имя `mse` уже занято модулем `ml`, поэтому тензорная потеря называется `mse-loss` — два экспорта с одним именем из разных модулей дали бы `ImportConflict`.
+В autograd-цикле можно обновлять веса **на месте** `tset!` по `(grad-of w)`, `sgd-update!` или `adam-update!`; чистый `adam-step` возвращает новое состояние с wildcard-формой `(_ _)`, поэтому его результат не присваивается переменной с конкретной формой `(2 1)` (см. гл. 17). `adam-update!` копирует моменты `m`/`v` в уже существующие stable-буферы через `t-copy!`, а не перепривязывает слоты к scratch. Имя `mse` уже занято модулем `ml`, поэтому тензорная потеря называется `mse-loss` — два экспорта с одним именем из разных модулей дали бы `ImportConflict`.
 
-> 🐍 `adam-step` ≈ `optimizer.step()` в PyTorch, только состояние — обычная структура `adam-state`, а не скрытый словарь optimizer'а; `linear-regression-step` ≈ ручной `W -= lr * Xᵀerr` без autograd.
+> 🐍 `adam-update!` ближе всего к `optimizer.step()` в PyTorch: состояние — обычная структура `adam-state`, а не скрытый словарь optimizer'а. `adam-step` — чистая функция, возвращающая новое состояние; `linear-regression-step` ≈ ручной `W -= lr * Xᵀerr` без autograd.
 
 ## 15.8 symbolic — символьный движок
 
@@ -453,12 +458,16 @@ CSV, regex и аудио в stdlib 0.19.16 **не входят**: для раз�
 Правила загрузки:
 
 - модуль грузится лениво при первом `import`/`import-from`;
-- повторный импорт идемпотентен;
+- поиск идёт по порядку **встроенные модули → подключённые `.qlsl`-пакеты**; исходник из пакета читается лениво и освобождается после загрузки;
+- повторный импорт идемпотентен, в том числе из пакета; тот же архив можно передать повторно, другой пакет с тем же именем даёт `DuplicatePackage`;
+- каталог `--path` сканируется лексикографически; `QUALISP_PATH` разделяется разделителем путей ОС;
+- `qualisp.lock` (флаг `--lock`, env `QUALISP_LOCK`, автопоиск рядом со скриптом) проверяет SHA-256, имя и версию всех пакетов до применения; при активном lock поисковые пути и соседний edge-`stdlib.qlsl` не используются;
 - `core` и `error` — предустановленный prelude, остальные требуют явного импорта;
-- явного `MODULE`-заголовка с описью зависимостей в 0.19.16 нет — зависимости модуля определяются его телом;
+- в edge-сборке (`-Dembed-stdlib=false`) встроены только `core`+`error`; остальные 11 модулей ищутся в `stdlib.qlsl` рядом с бинарником (`bin/../share/qualisp/stdlib.qlsl`) или в пакете, переданном `--package`;
+- явного `MODULE`-заголовка с описью зависимостей в 0.19.20 нет — зависимости модуля определяются его телом;
 - `macroexpand-all` раскрывает рекурсивно, не заходя в `quote`.
 
-CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; флаги интерпретатора разбираются только до имени скрипта, всё после — program args (`command-line-args`). Файловый раннер не печатает результат последней формы — только явный `print`.
+CLI раннера: `qualisp [--trace <file.json>] [--package <pkg.qlsl>] [--path <dir>] [--lock <file>] [--no-lock] [script.qlsp [args…]]`; `--package` и `--path` можно повторять. Флаги интерпретатора разбираются только до имени скрипта, всё после — program args (`command-line-args`). Файловый раннер не печатает результат последней формы — только явный `print`.
 
 > 🐍 Как импорт Python: тело модуля исполняется при первом импорте, дальше — из `sys.modules`; только зависимости здесь не описываются заголовком, а выводятся из самого кода.
 
@@ -473,7 +482,7 @@ CLI раннера: `qualisp [--trace <file.json>] [script.qlsp [args…]]`; ф�
 | `test` | `assert-fixnum`, `assert-string` | `assert` |
 | `io` | файлы, `read-lines`, `with-file`, `each-line` | `open` + контекстный менеджер |
 | `ml` | метрики, split, масштабирование, `t-mse` | `sklearn.metrics` / `preprocessing` |
-| `dl` | логиты, MSE, SGD/Adam/momentum, линейная регрессия | `torch.nn` / `torch.optim` |
+| `dl` | слои, LayerNorm/attention/embedding, conv/pool, dropout, потери, init, SGD/Adam/momentum | `torch.nn` / `torch.optim` |
 | `symbolic` | match/rewrite/diff/grad/unify, полиномы | `sympy` |
 | `argparse` | флаги, значения опций, позиционные аргументы | `argparse` |
 | `tablet` | числовая таблица `:f32`, методы через `deftrait` | `pandas.DataFrame` |

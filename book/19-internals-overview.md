@@ -1,6 +1,6 @@
 # Глава 19. Устройство компилятора
 
-Краткая экскурсия во внутренности Qualisp релиза 0.19.16 (реализация на Zig): как исходник превращается в программу, какие подсистемы за этим стоят и как они делят ответственность. Полные решения по языку — в `SPEC.md`, архитектурная сводка и дорожная карта — в `AGENTS.md`, публичные API подсистем — в `src/CODE.md` и `src/*/CODE.md` дерева разработки; контракт LSP — в `docs/lsp.md`, замеры JIT — в `docs/monomorphization.md`.
+Краткая экскурсия во внутренности Qualisp релиза 0.19.20 (реализация на Zig): как исходник превращается в программу, какие подсистемы за этим стоят и как они делят ответственность. Полные решения по языку — в `SPEC.md`, архитектурная сводка и дорожная карта — в `AGENTS.md`, публичные API подсистем — в `src/CODE.md` и `src/*/CODE.md` дерева разработки; контракт LSP — в `docs/lsp.md`, замеры JIT — в `docs/monomorphization.md`.
 
 ## 19.1 Пайплайн
 
@@ -50,42 +50,50 @@ src/
 ├── types.zig         Type, парсер, assignable
 ├── param_spec.zig    единый парсер парных аннотаций: normalizeParams,
 │                     splitHeader, splitMethod, splitDefvar
-├── checker.zig       статический typechecker ядра
-├── overload.zig      ключи и разрешение перегрузки
+├── checker.zig       статический typechecker ядра + таблица check_dispatch
+├── overload.zig      ключи и статическое разрешение перегрузки
+├── prim_registry.zig реестр примитивов как данные (слои/эффекты)
 ├── macros.zig        defmacro, expander, gensym
 ├── eval.zig          evalValue: expand→check→emit→run
-├── jit/              emitter (raw fixnum-слоты, emitRaw), memory (W^X),
-│                     helpers, cache, stencils, abi
+├── jit/              emitter (raw fixnum/flonum-слоты, инлайн-вызовы,
+│                     prim_dispatch), memory (W^X), helpers, cache, stencils, abi
 ├── prims/            list, math, string, io, type, error
 ├── object.zig        struct/trait логика
-├── tensor/           Tensor + eager-операции (параллельные ветки) + TensorBufferPool
+├── tensor/           Tensor + eager-операции, dtype i64, conv/pool,
+│                     параллельные ветки + TensorBufferPool
 ├── kernel_pool.zig   ленивый пул вычислительных ядер; воркеры без Runtime
-├── hlo/              граф (sin/cos/sqrt/atan, mask-ops), trace,
-│                     forward/backward, compile/pool/fused, kernels
+├── hlo/              граф (dims/attrs, batched matmul, conv/pool, gather/scatter,
+│                     i64-данные), trace, forward/backward, compile/pool/fused
 ├── ns/               atom, expr, bdd, coverage, router, compaction, form, plan;
 │                     параллельные band/branch/counting-sort/gather/scatter
 ├── ffi/              C-типы, trampoline, загрузка библиотек
 ├── image/            бинарный формат QSRD
 ├── profile.zig       трассировка Chrome Trace JSON
 ├── lsp_abi.zig       libqualisplsp: analysis-only C ABI для LSP
-├── stdlib.zig        13 встроенных модулей (через @embedFile)
+├── runtime_abi.zig   libqualisp: исполняющий C ABI, search path/lock, Python
+├── qlsl.zig          .qlsl: stored ZIP, manifest.qlsp, CRC32, поиск, lock
+├── pack_main.zig     CLI qualisp-pack: pack и lock
+├── stdlib.zig        13 модулей (обычно @embedFile, edge — stdlib.qlsl)
 ├── stdlib/*.qlsp     core, error, string, collections, test, ml, dl, symbolic,
 │                     argparse, tablet, io, datetime, neuro
-│                     (+ probe.qlsp, typepairs_probe.qlsp — только тесты)
-├── tests.zig         регистрация 910 тестов
-├── *_test.zig        32 файла с тестами
+│                     (+ manifest.qlsp, probe.qlsp, typepairs_probe.qlsp)
+├── tests.zig         регистрация 1095 тестов
+├── *_test.zig        42 файла с тестами
 └── test_support.zig  общий harness
-tools/qsrd/           читатель QSRD (inspect/verify/cat/params/symbols/extract)
+tools/qsrd/           Rust-читатель QSRD (inspect/verify/cat/params/symbols/extract)
 tools/qprof/          агрегатор трасс self/inclusive по именам
+tools/surface.py      генерация docs/core-surface.md из prim_registry.zig
 tools/lsp/build.sh    сборка libqualisplsp + qualisp-lsp в zig-out/lsp/
 tools/qualisp-lsp/    Rust-сервер: stdio JSON-RPC над C ABI
 editors/vscode/       расширение VSCodium/VS Code (чистый JS), VSIX
+bench/pytorch/        четыре шага обучения Qualisp vs PyTorch CPU
 experiments/          source-to-source полигон (defun*)
 docs/lsp.md           контракт C ABI, фичи LSP, владение буферами
-docs/monomorphization.md  замеры специализации-lite и M3a (unboxed locals)
+docs/core-surface.md  снимок 171 примитива по слоям
+docs/monomorphization.md  замеры специализации-lite, M3a/M3b/M3c и M4
 ```
 
-Stdlib — Qualisp-код, вшитый в бинарник через `@embedFile`; prelude — `core` **и `error`** (загружаются и импортируются при старте), остальные 11 модулей — лениво при первом `import`. `probe.qlsp` и `typepairs_probe.qlsp` — test-only фикстуры, вшиваются только в test-сборки. В каждом подкаталоге `src/X/` лежит `CODE.md` с API и ограничениями подсистемы. LSP и IDE живут в дереве (`src/lsp_abi.zig`, `tools/qualisp-lsp/`, `editors/vscode/`), но их готовые бинарники в релизные ассеты не входят.
+Stdlib — Qualisp-код; в обычной сборке вшит через `@embedFile`, в edge-профиле (`-Dembed-stdlib=false`) остаются только `core`+`error`, а 11 модулей читаются из `stdlib.qlsl`. Prelude — `core` **и `error`** (загружаются и импортируются при старте), остальные модули — лениво при первом `import`. `probe.qlsp` и `typepairs_probe.qlsp` — test-only фикстуры, вшиваются только в test-сборки. В каждом подкаталоге `src/X/` лежит `CODE.md` с API и ограничениями подсистемы. LSP и IDE живут в дереве (`src/lsp_abi.zig`, `tools/qualisp-lsp/`, `editors/vscode/`), но их готовые бинарники в релизные ассеты не входят; исполняющий `libqualisp` — отдельная библиотека и попадает в Python-wheel.
 
 ## 19.3 Reader
 
@@ -185,7 +193,7 @@ Runtime-ошибка: хелпер зовёт `bailAt(@returnAddress(), msg)`, �
 
 Ядро чекера и эмиттера: `quote`, `if`, `progn`, `let`, `setq`, `while`, `lambda`/`\`, `defun`, `defvar`, `and`, `or`, `cond`, `the`, вызовы; `funcall`/`apply`, `read-from-string`/`write-to-string`; `defmacro`, `macroexpand-1`, `macroexpand`, `macroexpand-all`, `gensym`; `defstruct`, `slot-value`, `set-slot`, `deftrait`, `impl`; `import`, `import-from`; `defgraph`, `defuse`; `ns-if`; `tensor`; `throw`, `catch-error`; `eval`. Примитивы (`+ - * /`, сравнения, `car`/`cdr`/`cons`, `print`, `map`/`filter`/`reduce`, тензорные ядра, `result-error`/`format-error`, `ffi-load`/`ffi-defun`, файловые и QSRD-примитивы, `future`/`await`) живут в реестрах, а не в спецформах.
 
-- `defun` требует парных аннотаций параметров `(p . :T)` и результата — последней формы тела `(expr . :ret)`; у `lambda` аннотируются только параметры, результат выводится. `defvar name (value . :type)`; поля структур `(field . :T)`, метод трейта `(name ((self . :self)) . :ret)`. `&optional` внутри тела — `(:option T)`, `&rest` — `(:list T)`; `let` — параллельные биндинги; `let*` отсутствует. `defmacro` — исключение: `(defmacro name (form :syntax) :syntax …)`. Пользовательских перегрузок нет: повторный `defun` с тем же именем — ошибка. `:any` запрещён.
+- `defun` требует парных аннотаций параметров `(p . :T)` и результата — последней формы тела `(expr . :ret)`; у `lambda` аннотируются только параметры, результат выводится. `defvar name (value . :type)`; поля структур `(field . :T)`, метод трейта `(name ((self . :self)) . :ret)`. `&optional` внутри тела — `(:option T)`, `&rest` — `(:list T)`; `let` — параллельные биндинги; `let*` отсутствует. `defmacro` — исключение: `(defmacro name (form :syntax) :syntax …)`. Пользовательские перегрузки есть: `defun` с новым набором типов/арности добавляет вариант, повторный набор — ошибка; вызов разрешается checker'ом статически (ключ `(имя, арность, типы параметров)`, тип результата в ключ не входит). Общий `:any` запрещён, допустим только ранговый wildcard `(:tensor DTYPE :any)`.
 - Сигнатуры всех литеральных top-level `defun` публикуются **до** проверки первой формы (`declareFunctions`), поэтому прямая ссылка вперёд и взаимная рекурсия типизируются; определение исполняется по порядку, вызов до определения — runtime-ошибка.
 - Тела `defgraph`/`defuse` раскрываются отдельно (`Session.expandBody`) и клонируются в world: иначе тело `defuse` висело бы на scratch. Тело макроса проверяется в живом окружении (чекер берётся из `Runtime.checker`), поэтому макрос может звать хелперы модуля.
 - `eval : :syntax → :a` — проверяемый каст; `:a` выводится из контекста; форма заново проходит expand/typecheck/emit, несовпадение типа — runtime-ошибка. Единственная документированная граница статики.
@@ -197,18 +205,18 @@ Runtime-ошибка: хелпер зовёт `bailAt(@returnAddress(), msg)`, �
 ## 19.7 Тензорная подсистема
 
 ```zig
-pub const DType = enum { f16, f32, f64, u8 };
+pub const DType = enum { f16, f32, f64, u8, i64 };
 pub const Owner = enum { scratch, world, pool };
 pub const Tensor = struct {
     dtype: DType,
     shape: []usize,          // конкретная форма
-    storage: Storage,        // union(DType) { f16/f32/f64: []T, u8: []u8 }
+    storage: Storage,        // union(DType) { f16/f32/f64/i64: []T, u8: []u8 }
     owner: Owner = .scratch,
     requires_grad: bool = false,
 };
 ```
 
-Тензор — атом: dtype + concrete shape + плоский буфер. Литерал `(tensor ((1.0 2.0) (3.0 4.0)))` всегда `:f32`, прямоугольность проверяется; `zeros`/`ones`/`randn` требуют dtype-ключ и литеральную форму. `randn` — xorshift64* в `Runtime`, не криптостойкий. Eager-тензор живёт в scope-арене, `PARAM`/`defvar` — stable, `TensorBufferPool` — только HLO.
+Тензор — атом: dtype + concrete shape + плоский буфер. Литерал `(tensor ((1.0 2.0) (3.0 4.0)))` всегда `:f32`, `(tensor :i64 …)` хранит точные целые; прямоугольность проверяется. `zeros`/`ones`/`randn`/`rand` требуют dtype-ключ и принимают литеральную форму или `(list n m)` (ранг статический, размеры runtime). `randn` — xorshift64* в `Runtime`, не криптостойкий; `rand` равномерный [0,1). Eager-тензор живёт в scope-арене, но буфер берёт из `TensorBufferPool`; `PARAM`/`defvar` копируются в stable на общем аллокаторе. Тот же пул обслуживает HLO-промежутки; блоки возвращаются ОС только при `clear`/teardown.
 
 Быстрые пути: `elementwise`/`map` — `@Vector` 8×f32 / 4×f64 без f64-раундтрипа; `matmul` по `i-k-j` с `@Vector`; reductions блоками — 8 независимых f64-полос, фиксированный порядок сведения (результат детерминирован, но не «слева направо»). `u8`-деление запрещено статически; `:u8` в `tsum`/`tmax` даёт `:fixnum`. Вычислительные ядра параллелятся через `src/kernel_pool.zig`: ленивый пул (воркеры создаются на первом достаточно большом вызове, `max(1, min(cpu-1, 8))`), у воркеров нет `Runtime`, вызывающий выделяет непересекающиеся выходные диапазоны, общие `frame.pool`, `grads[]`, `rt.trace` и scope-арены остаются на одном потоке, вложенный параллелизм отключён. Маленькие входы остаются последовательными, `QUALISP_SERIAL=1` отключает пул. Параллельны `elementwise`/`map` (порог ~256K), `matmul` по строкам, `reshape`/`transpose` по строкам, `tsum`/`tmean` по 8-полосным partial'ам с фиксированным порядком сведения — результат побайтно совпадает с последовательным. Пока последовательные: `max`, `softmax`, `argmax`, `reduceToShape`.
 
@@ -216,7 +224,7 @@ pub const Tensor = struct {
 
 `TensorBufferPool` — exact-size free lists по `(len, alignment)`, реализация `std.mem.Allocator`; буферы переиспользуются, финальный выход копируется в scratch. `Graph.peak_bytes` — оценка пика, жёсткий cap не enforced.
 
-Устройства нет: `Owner` — `scratch`/`world`/`pool`, `device` в перечислении отсутствует, все ядра — C-ABI функции на x86-64 с AVX2. Writable views и `t-slice` отсутствуют; `reshape`, `transpose`, `t-rows`, `t-select-rows`, `t-column` копируют. Печать — `#<tensor dtype (dims)>` без содержимого.
+Устройства нет: `Owner` — `scratch`/`world`/`pool`, `device` в перечислении отсутствует, все ядра — C-ABI функции на x86-64 с AVX2. DType — `f16/f32/f64/u8/i64`; `i64` хранится точно, без round-trip через f64, и не дифференцируется. Writable views отсутствуют; `reshape`, `transpose`, `t-rows`, `t-select-rows`, `t-column`, `t-slice` копируют, `t-copy!` пишет на месте. `TensorBufferPool` обслуживает eager-скретч и HLO. Печать — `#<tensor dtype (dims)>` без содержимого.
 
 ## 19.8 Autograd
 
@@ -224,7 +232,7 @@ pub const Tensor = struct {
 
 `ql_graph_run` сохраняет последний запуск в `Runtime.last_run` (сбрасывается в конце top-level формы); forward с `frame.retain = 1` не освобождает активации — все лежат в per-run `TensorBufferPool`. `(grad! loss)` сеет единицы формы выхода и идёт по узлам с конца, читая forward-значения из `run.values` — **без replay**, O(n) по узлам и O(n) по активациям до `grad!`/конца формы. Градиенты накапливаются в scratch; для `param`-входов копируются в stable и кладутся в `Tensor.grad`; `(grad-of t)` возвращает stable-градиент или нули той же формы/dtype.
 
-Backward-правила: `add`, `sub`, `mul`, `div` (reduce по broadcast), `neg`, `matmul`, `reshape`, `transpose`, `relu`, `exp`, `log`, `tanh`, `sin`, `cos`, `sqrt`, `atan`, `softmax`, `sum`, `mean`, `max`; `sum` размножает grad, `mean` делит на число элементов, `max` отдаёт grad всем максимумам. `sin/cos/sqrt/atan` получили forward и backward во всех слоях HLO: узел `Op` (`graph.zig`), traced execution, compiled- и backward-ядра (`kernels.zig`, `bwd_kernels.zig`, `compile_backward.zig`); аналитические производные сверены с autograd по каждому оператору. Backward компилируется в обратную последовательность вызовов `ql_bwd_*` (x86-64, W^X); интерпретатор — fallback при ошибке компиляции.
+Backward-правила: `add`, `sub`, `mul`, `div` (n-арный: числитель `1/(b·c…)`, знаменатель `−output/den`, broadcast через reduce), `neg`, batched `matmul`, `reshape`, `transpose` с перестановкой, `relu`, `exp`, `log`, `tanh`, `sin`, `cos`, `sqrt`, `atan`, `abs`, `softmax`/`log-softmax` по последней оси, осевые `sum`/`mean`/`max`, `slice`, `concat`, `conv2d`, max/avg pooling, взаимно сопряжённые `gather`/`scatter_add`; `argmax_axis`/`one_hot`/`gt`/`lt` дискретны. `sum` размножает grad, `mean` делит на число элементов, `max` отдаёт grad всем максимумам. `sin/cos/sqrt/atan` получили forward и backward во всех слоях HLO: узел `Op` (`graph.zig`), traced execution, compiled- и backward-ядра (`kernels.zig`, `bwd_kernels.zig`, `compile_backward.zig`); аналитические производные сверены с autograd по каждому оператору. Backward компилируется в обратную последовательность вызовов `ql_bwd_*` (x86-64, W^X); интерпретатор — fallback при ошибке компиляции.
 
 Рядом с autograd работает символьный reverse-mode `(grad term var)` из `symbolic`: это градиент **скалярного лосса `(tsum term)`**, а не поэлементная производная `diff`. `grad = (simplify (grad-step term var 1.0))`; правила покрывают `+ - * / ^` (num exponent), `tsum`/`tmean`/`tmax`, `matmul` по обоим аргументам, `transpose`, `reshape`, `relu`, 1-D `softmax`, унарные `sin…atan` и операции-спутники `ones-like`/`tmax-mask`/`relu-mask`/`reshape-like`, которые сохраняются отдельными тензорными узлами и не склеиваются `simplify`. `term` транслирует все эти операции; `(^ base n)` над составным основанием связывает подтерм один раз через `let` (gensym `pow`), а не дублирует его. `diff` знает унарные производные `sin/cos/exp/log/sqrt/tanh/atan`, n-арные `+`/`*`/`-` и унарный минус, но на `relu` и `matmul` даёт внятный отказ с советом `grad`.
 
@@ -244,7 +252,7 @@ Backward-правила: `add`, `sub`, `mul`, `div` (reduce по broadcast), `ne
 
 ### Компиляция и пул
 
-`Graph.compiled` — ленивый `CompiledGraph`; второй вызов — без ожидания, первый ждёт job (`mutex` + `Condition`). `N = min(cpu_count, 8)` воркеров компилируют независимые графы; `Session` создаёт пул лениво, если есть `io`, иначе синхронно. Каждый compiled-вызов создаёт свой `TensorBufferPool`: один граф можно вызывать параллельно из futures без mutex. Ядра C-ABI — в `src/hlo/kernels.zig`, backward — в `src/hlo/bwd_kernels.zig`, узел NS — `ql_hlo_ns_if`; f64/f32/u8 ядра, SIMD AVX2.
+`Graph.compiled` — ленивый `CompiledGraph`; второй вызов — без ожидания, первый ждёт job (`mutex` + `Condition`). `N = min(cpu_count, 8)` воркеров компилируют независимые графы; `Session` создаёт пул лениво, если есть `io`, иначе синхронно. Каждый compiled-вызов создаёт свой `TensorBufferPool`: один граф можно вызывать параллельно из futures без mutex. Ядра C-ABI — в `src/hlo/kernels.zig`, backward — в `src/hlo/bwd_kernels.zig`, узел NS — `ql_hlo_ns_if`; f64/f32/u8/i64 ядра, SIMD AVX2.
 
 `defuse` — отдельный путь: тело — одно elementwise-выражение (`+ - * /`, унарный `-`, `relu`, числа, параметры; без `let`, вызовов и тензорных литералов), все тензорные параметры — `:f32` одной конкретной формы, скалярные — `:flonum`/`:fixnum`. Первый eager-вызов компилирует скалярный f32-цикл x86-64 без промежуточных тензоров: AVX2 по 8 f32 + scalar-tail, константы в `CompiledFused.constants`. Внутри `defgraph` вызов `defuse` инлайнится в `let` перед трассировкой, поэтому forward/backward идут обычными HLO-узлами.
 
@@ -265,17 +273,18 @@ emit(form, env, expected_type) -> Code {
 
 Быстрые пути: литералы, копия слота (16+8 байт), чтение глобала (`id < present.len` + байт `present`), запись глобала (только immediate `tag ≤ :symbol`, не-worker, существующий id), promotion в `while`, откат итерации (`Emitter.mayAllocate`), инлайн fixnum-арифметики и сравнений с guard'ом тега и bail-блоком на прежний helper. Смещения считаются через `@offsetOf`: переезд поля ломает сборку, не семантику.
 
-**M3a — unboxed fixnum-локальные.** Слоты кадра получили вид `value | raw_int`: параметры и `let`-биндинги с доказанным `:fixnum` живут в payload-области без тега. `emitRaw` эмитит арифметику, унимнус и сравнения над raw-слотами; боксинг происходит на границе — передача в вызов, возврат, захват замыканием. Функции с `lambda` в теле отключают raw (`allow_raw = false`), чтобы замыкание не читало слот как `Value`. Замер A/B ReleaseFast, 2M итераций (`docs/monomorphization.md` §4.7):
+**M3a/M3b — unboxed fixnum- и flonum-локальные.** Слоты кадра получили вид `value | raw_int | raw_float`: обязательные параметры с `:fixnum`/`:flonum` и `let`-биндинги с доказанным типом живут в payload-области без тега. `emitRaw` эмитит fixnum-арифметику, унимнус и сравнения либо SSE2 `movsd/addsd/subsd/mulsd`; смешанная арифметика конвертирует через `cvtsi2sd`, а `:fixnum → :flonum` при передаче параметра проверяет тег и конвертирует (иначе `(mean (list 1 2 3 4))` прочитал бы биты int как f64). `&optional`/`&rest` в raw не идут; `tail_self` копирует аргументы в `param_slots`, поэтому raw-параметр обновляется и цикл сходится. Боксинг — на границе вызова/возврата/захвата; функции с `lambda` в теле отключают raw (`allow_raw = false`). Замер A/B ReleaseFast (`docs/monomorphization.md`):
 
 | Сценарий | До | После |
 |---|---|---|
 | `loop1` (один `+`) | 10.22 нс | 3.15 нс (3.2×) |
 | `local_arith` (два `+`) | 14.94 нс | 4.49 нс (3.3×) |
-| `arith` (глобалы) | 17.36 нс | 17.59 нс (без изм.) |
-| `calls` (вызов в цикле) | 33.51 нс | 33.1 нс |
-| `fib` | 42 мс | 42.5 мс (call-bound) |
+| flonum-цикл | — | 4.82 нс |
+| `arith` (глобалы, M3c) | 17.6 нс | 10.4 нс (1.7×) |
+| `calls` (локальный вызов, M4) | 26.6 нс | 13.9 нс (1.9×) |
+| `fib` | 42.2 мс | 25.8 мс (1.6×) |
 
-Глобалы и вызовы остаются боксованными; тесты — `src/unboxed_test.zig` (7). **Специализация-lite** (карта типов на узлах чекера, типовое окружение эмиттера, unguarded fixnum-арифметика) измерена и откачена: 18.15 → 18.26 нс на arith-loop, 33.51 → 32.68 нс на calls-loop, fib 42 → 43 мс — tag-guard'ы не бутылочное горлышко, время уходит на 24-байтные `Value`-загрузки/сохранения и механизм вызова. JIT на данный момент мономорфным не является; реальный выигрыш дал только unboxing локальных.
+**M3c — scalar replacement глобалов.** В `while` без вызовов fixnum-глобал загружается в raw на входе и один раз записывается назад после цикла. Циклы с вызовами, `lambda` или `let` не кэшируются. **M4 — инлайн-вызов глобала.** Вместо `ql_call_global → callFunc` эмиттер разрешает `Func`, проверяет форму и переполнение кадра, копирует аргументы и делает `call [func.entry]`; промахи (метод по тегу, `&optional`/`&rest`, хвостовой вызов, профайлер, переполнение) уходят в generic helper. Traceback стал ленивым: `FrameInfo{name,address}`, а `file:line:column` резолвится только при ошибке; линейный поиск source map ушёл с горячего пути. Остаток вызова ~14 нс — пролог/эпилог, копии `Value`, косвенный `call`; следующий шаг — регистровый ABI. Тесты — `src/unboxed_test.zig` и `jit_test`. **Специализация-lite** (карта типов на узлах чекера, unguarded fixnum-арифметика) измерена и откачена: tag-guard'ы не бутылочное горлышко, время уходит на 24-байтные `Value` и механизм вызова. JIT мономорфным не является; выигрыш дали unboxing, scalar replacement и инлайн-вызов.
 
 Ограничения: deopt не реализован — страницы не специализированы, helper-путь и есть generic-путь; guard'ы ставят `RuntimeError`. Struct-инстансы и `Result` живут до `Runtime.deinit`. `eval` возвращает `:syntax`/`:atom` консервативно; конкретика через `the`.
 
@@ -290,7 +299,7 @@ emit(form, env, expected_type) -> Code {
 | `coverage.zig` | проверки покрытия: `I ∧ ¬covered` UNSAT, `I ∧ Gi ∧ Gj` UNSAT, `I ∧ Gi` SAT |
 | `form.zig` | разбор формы `ns-if` |
 | `router.zig` | атомы `[B,K]` → знаки → band → ветвь → группы строк; проверка overlap/uncovered на месте |
-| `compaction.zig` | counting sort, `gatherRows`/`scatterRows` для всех 4 dtype |
+| `compaction.zig` | counting sort, `gatherRows`/`scatterRows` для всех 5 dtype |
 | `plan.zig` | runtime-план |
 
 Дискретное условие — NS-функция: непрерывная level-функция, знак которой равен истинности; `>`/`<`/`and`/`or` не перегружаются. `ns-grt`/`ns-geq` — `a-b`, `ns-lss`/`ns-leq` — `b-a`, `ns-and`/`ns-or` — левая свёртка бинарной R-функции, `ns-not` — `-p`, `ns-eq`/`ns-neq` — сахар полосы. n-арная формула `Σaᵢ − √(Σaᵢ²)` знаково неверна при n ≥ 3.
@@ -326,18 +335,18 @@ total self time: 21248.0 us
 
 ```bash
 zig build          # сборка в zig-out/bin/qualisp
-zig build test     # 910 тестов
+zig build test     # 1095 тестов
 zig build run      # запуск
 zig fmt src        # форматирование
 bash bench/run.sh  # замеры (эталон — Rust -O3)
 gh workflow run CI # ручной CI: Linux и Windows
 ```
 
-`build.zig` импортирует `build.zig.zon` для `manifest.version` (`0.19.16`, `minimum_zig_version = 0.17.1`); для Windows выставляет `exe.stack_size = 256 * 1024 * 1024`. `zig build test`: **910 тестов** на Linux и 910 на Windows (3 POSIX-FFI теста пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы). Состав счётчика: 909 именных `test "…"` плюс один анонимный блок `test { … }` в `src/tests.zig:1`. Регистрация — `src/tests.zig`, 32 файла `_test.zig` (добавлены `parallel_test`, `experiments_test`, `type_pairs_test`, `error_module_test`, `unboxed_test`, `neuro_dumb_test`, `stdlib_datetime_test`, `lsp_abi_test`); крупнейшие: `jit_test` (170), `checker_test` (88), `session_test` (82), `ns_test` (66), `ns_expr_test` (58), `ns_lang_test` (44), `stdlib_dl_test` (40), `printer_test` (36), `lexer_test` (34), `stdlib_symbolic_test` (29), `stdlib_neuro_test` (19), `lsp_abi_test` (16), `neuro_dumb_test` (15), `stdlib_datetime_test` (6), `error_module_test` (6), `unboxed_test` (7), `parallel_test` (3). Системы сюит `deftest`/`run-tests` в реализации нет — тесты плоские. Отдельно 12 Rust-интеграционных тестов LSP и мок-тест расширения `node editors/vscode/test/smoke.js`.
+`build.zig` импортирует `build.zig.zon` для `manifest.version` (`0.19.20`, `minimum_zig_version = 0.17.1`); для Windows выставляет `exe.stack_size = 256 * 1024 * 1024`. `zig build test`: **1095 тестов** на Linux и 1095 на Windows (3 POSIX-FFI теста пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы). Состав счётчика: 1094 именных `test "…"` плюс один анонимный блок `test { … }` в `src/tests.zig:1`. Регистрация — `src/tests.zig`, 42 файла `_test.zig`; крупнейшие: `jit_test` (178), `session_test` (97), `checker_test` (88), `ns_test` (65), `ns_expr_test` (59), `ns_lang_test` (53), `stdlib_dl_test` (47), `lexer_test` (43), `printer_test` (36), `reader_test` (34), `types_test` (33), `stdlib_symbolic_test` (29), `stdlib_test` (25), `stdlib_tablet_test` (23), `tensor_broadcast_test` (22), `tensor_axis_test` (22), `unboxed_test` (20), `ns_graph_test` (20), `stdlib_neuro_test` (19), `lsp_abi_test` (16). Сюиты, появившиеся в 0.19.19: `prim_registry_test`, `dispatch_test`, `overload_test`, `tensor_rank_test`, `tensor_conv_test`, `slot_stability_test`, `qlsl_test`, `runtime_abi_test`; в 0.19.20 в `qlsl_test` и `runtime_abi_test` добавлены проверки search path и lock-файла. Системы сюит `deftest`/`run-tests` в реализации нет — тесты плоские. Отдельно 12 Rust-интеграционных тестов LSP и мок-тест расширения `node editors/vscode/test/smoke.js`.
 
-Релизные артефакты — ровно 6 файлов: `qualisp-0.19.16-linux-x86_64`, `qualisp-0.19.16-windows-x86_64.exe`, `qprof-0.19.16-linux-x86_64`, `qprof-0.19.16-windows-x86_64.exe`, `qprof-0.19.16-windows-x86_64.pdb`, `SHA256SUMS.txt`; `--version` печатает `qualisp 0.19.16`. LSP-сервер, `libqualisplsp` и VSIX в ассеты не входят — их собирают локально.
+Релизные артефакты — ровно 8 файлов: `qualisp-0.19.20-linux-x86_64`, `qualisp-0.19.20-windows-x86_64.exe`, `qprof-0.19.20-linux-x86_64`, `qprof-0.19.20-windows-x86_64.exe`, `qprof-0.19.20-windows-x86_64.pdb`, `qualisp-0.19.20-py3-none-linux_x86_64.whl`, `qualisp-0.19.20-py3-none-win_amd64.whl`, `SHA256SUMS.txt`; `--version` печатает `qualisp 0.19.20`. `libqualisp` входит в wheel, отдельного ассета нет. LSP-сервер, `libqualisplsp` и VSIX в ассеты не входят — их собирают локально.
 
-Замеры ReleaseFast этапа 0.19.16: unboxed-локальные дают 3.2–3.3× на локальных fixnum-циклах (§19.9); параллельный matmul — 15.9 → 7.6 мс (2.10×) на 16 ядрах (§19.7); общий fib остаётся call-bound (~42 мс).
+Замеры ReleaseFast этапа 0.19.19–0.19.20: raw fixnum-цикл 14.9 → 3.7 нс, flonum-цикл 4.82 нс; global arith 17.6 → 10.4 нс (M3c); fib 42.2 → 25.8 мс и локальный вызов 26.6 → 13.9 нс (M4); параллельный matmul — 15.9 → 7.6 мс (2.10×); свёртка fwd+bwd 163 → 40 мс (4.1×). PyTorch-стенд: mlp 0.495 vs 0.354 мс/шаг, embedding 0.306 vs 0.277, conv 3.222 vs 0.684, attention 1.992 vs 0.409 (см. гл. 8.7).
 
 Платформы: Linux x86-64 — основная; Windows x86-64 (`gnu`/`msvc`) — с SysV-ABI для JIT-кода; отличаются только W^X (`VirtualAlloc`/`VirtualProtect`), файловые хэндлы-токены поверх `std.Io.File` и резерв стека в PE. FFI: POSIX — `dlopen`/`dlsym`, Windows — `LoadLibraryA`/`GetProcAddress` и Win64-трамплин (регистры по позиции аргумента, 32 байта shadow space, стек для позиций ≥ 4).
 
@@ -356,29 +365,29 @@ QSRD — бинарный формат с magic `"QSRD"`, u16 major/minor, та�
 | AVX2 | 8×f32 / 4×f64 |
 | Reductions | 8 независимых f64-полос, фиксированный порядок сведения |
 | Source map | ~24 байта на форму, `MapEntry{start,end,span}` |
-| DType | `f16`, `f32`, `f64`, `u8` |
-| Модули stdlib | 13 (`core` и `error` — prelude; `probe.qlsp`/`typepairs_probe.qlsp` — только в test-сборках) |
-| Тесты | 910 (`src/tests.zig`, 32 файла `_test.zig`) |
+| DType | `f16`, `f32`, `f64`, `u8`, `i64` |
+| Модули stdlib | 13 (`core` и `error` — prelude; edge — `stdlib.qlsl`; `probe.qlsp`/`typepairs_probe.qlsp` — только в test-сборках) |
+| Тесты | 1095 (`src/tests.zig`, 42 файла `_test.zig`) |
 | QSRD | magic `"QSRD"`, u16 major/minor, crc32 на секцию |
 
 ## 19.14 Известные ограничения
 
 - **GPU/Device нет.** Вычисления идут на CPU x86-64 через JIT и AVX2-ядра; других архитектур и бэкендов нет.
-- Deopt не реализован: страницы не специализированы, helper-путь и есть generic-путь; guard'ы ставят `RuntimeError`, а не перекомпилируют страницу. Специализация-lite измерена и откачена; рабочий выигрыш дают только unboxed fixnum-локальные (M3a).
-- `:any` запрещён; HM-вывод между функциями не делается; пользовательских перегрузок нет.
-- Writable views и `t-slice` отсутствуют; `reshape`/`transpose`/`t-rows`/`t-select-rows` копируют.
-- Autograd: `grad!` привязан к последнему запуску графа в форме; в графе нет `tref`/`tset!`, `pow`/`argmax` (`sqrt`/`sin`/`cos`/`atan` есть, включая backward); reductions — только float; нет вложенных графов, рекурсии и data-dependent control flow; нет автоматических CSE/DCE/FUSION. `diff` не дифференцирует `relu`/`matmul` — там нужен `(grad term var)`.
+- Deopt не реализован: страницы не специализированы, helper-путь и есть generic-путь; guard'ы ставят `RuntimeError`, а не перекомпилируют страницу. Специализация-lite измерена и откачена; рабочий выигрыш дают unboxed fixnum/flonum-локальные (M3a/M3b), scalar replacement (M3c) и инлайн-вызов (M4).
+- Общий `:any` запрещён; допустим только `(:tensor DTYPE :any)`. HM-вывод между функциями не делается. Перегрузки есть, но статические: ключ `(имя, арность, типы)`, без динамического диспетча и перегрузки по типу результата.
+- Writable views отсутствуют; `reshape`/`transpose`/`t-rows`/`t-select-rows`/`t-slice` копируют. `t-slice` — только статические смещения/длины.
+- Autograd: `grad!` привязан к последнему запуску графа в форме; в графе нет `tref`/`tset!`/`pow`/`t-copy!`/`rand-like`; `argmax_axis`/`one_hot`/`gt`/`lt` есть, но дискретны и без градиента; reductions — только float; `i64` не дифференцируется; нет вложенных графов, рекурсии и data-dependent control flow; нет автоматических CSE/DCE/FUSION. `diff` не дифференцирует `relu`/`matmul` — там нужен `(grad term var)`.
 - Параметры, не участвовавшие в запуске, сохраняют старый градиент; `clear` не освобождает граф и JIT-страницу до teardown.
 - Struct-инстансы и `Result` живут до `Runtime.deinit`; ошибки не разматываются через нативный C-стек.
 - `eval` возвращает `:syntax`/`:atom` консервативно; конкретика через `the`.
-- Релизные ассеты содержат только `qualisp` и `qprof` (плюс Windows-версии, PDB и `SHA256SUMS.txt`): LSP поставляется в исходниках и собирается локально. Отдельного модуля `async` нет — только примитивы `future`/`await` и тип `(:future T)`; `FFI` и `NS` — не импортируемые модули. Параллельные ядра не покрывают `max`/`softmax`/`argmax`/`reduceToShape`; воркеры не имеют `Runtime`, а вложенный параллелизм на них отключён.
+- Релизные ассеты содержат `qualisp`, `qprof`, два Python-wheel (в них `libqualisp` + `stdlib.qlsl`) и `SHA256SUMS.txt`; LSP поставляется в исходниках и собирается локально. Отдельного модуля `async` нет — только примитивы `future`/`await` и тип `(:future T)`; `FFI` и `NS` — не импортируемые модули. Параллельные ядра не покрывают `max`/`argmax`; `softmax`/`log-softmax` и свёртки теперь параллельны, воркеры не имеют `Runtime`, вложенный параллелизм на них отключён.
 - Обновление `defvar`/`setq` глобала внутри `future` — runtime-ошибка; возвращать future из future нельзя.
 
 ## 19.15 Модель памяти (кратко)
 
 Полное описание — гл. 5; здесь — сводка механики, на которой держится рантайм.
 
-**Модель (SPEC/AGENTS):** три пула HibLin — `ConsCellPool` (стек скоупа: cons, rope-узлы, замыкания, структуры), `StableMemory` (`defvar`, веса, глобалы, JIT-страницы; освобождение — `clear`/teardown), `TensorBufferPool` (только HLO, exact-size free lists). GC, RC и аренщика общего назначения нет.
+**Модель (SPEC/AGENTS):** три пула HibLin — `ConsCellPool` (стек скоупа: cons, rope-узлы, замыкания, структуры), `StableMemory` (`defvar`, веса, глобалы, JIT-страницы; освобождение — `clear`/teardown), `TensorBufferPool` (eager-скретч и HLO, exact-size free lists; возврат ОС только при `clear`/teardown). GC, RC и аренщика общего назначения нет.
 
 **Реализация в Zig:** `Store` — bump-регион фиксированных cons-ячеек и байтов с `mark()/restore()`; `Runtime` держит `world`/`scratch` и плотный массив глобалов; `cloneToWorld` — глубокая копия; кадры вызовов — отдельная bump-арена (§19.5). Исключения модели: бессмертные `nil`/`t`/символы; stable живёт до `clear`/teardown; циклы в мутабельных stable-структурах не собираются; JIT-страницы — выбрасываемый кэш; `eval` — единственная граница статики.
 
@@ -386,4 +395,4 @@ Stable никогда не ссылается на scratch: запись scratch
 
 ---
 
-Подробности по подсистемам: гл. 6 (тензоры), гл. 7 (autograd), гл. 10 (HLO), гл. 18 (шпаргалка), гл. 20 (JIT copy-and-patch), гл. 21 (образы QSRD). Тесты — 910 плоских тестов в 32 файлах `_test.zig`, зелёные по `zig build test` на Linux и Windows.
+Подробности по подсистемам: гл. 6 (тензоры), гл. 7 (autograd), гл. 10 (HLO), гл. 18 (шпаргалка), гл. 20 (JIT copy-and-patch), гл. 21 (образы QSRD). Тесты — 1095 плоских тестов в 42 файлах `_test.zig`, зелёные по `zig build test` на Linux и Windows.

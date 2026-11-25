@@ -1,24 +1,26 @@
 # Глава 16. Пакеты и FFI
 
-В 0.19.16 «пакетная экосистема» в привычном смысле отсутствует. Внешний код попадает в программу четырьмя способами: быть частью встроенной stdlib (`import`), быть отдельным `.qlsp`-файлом, запущенным раннером, быть разделяемой C-библиотекой через FFI или подключить LSP-сервер из исходников для редактора. Ни `qvalent`, ни `pkg-install`, ни `http-get` нет. Зато есть собственный бинарный формат QSRD, инструменты `tools/qsrd` и `tools/qprof`, кросс-платформенный FFI-трамплин и LSP (`libqualisplsp` + `qualisp-lsp`) — но LSP-бинарник и VSIX **в релизные ассеты не входят** (§16.7).
+В 0.19.20 «пакетная экосистема» в смысле центрального реестра отсутствует, но пакеты как формат уже есть. Внешний код попадает в программу несколькими способами: быть частью встроенной stdlib (`import`), лежать в `.qlsl`-пакете, быть отдельным `.qlsp`-файлом, быть разделяемой C-библиотекой через FFI, быть встроенным через `libqualisp`/Python или подключить LSP-сервер из исходников для редактора. Ни `qvalent`, ни `pkg-install`, ни `http-get` нет: `.qlsl` распространяется файлом. Зато есть детерминированный упаковщик `qualisp-pack`, поиск пакетов по `--path`/`QUALISP_PATH`, lock-файл `qualisp.lock`, edge-профиль stdlib, исполняющий C ABI `libqualisp`, Python-wheel, QSRD и кросс-платформенный FFI-трамплин. LSP (`libqualisplsp` + `qualisp-lsp`) по-прежнему собирается из исходников, и его бинарник/VSIX **в релизные ассеты не входят** (§16.7).
 
 ## 16.1 Способы подключить код
 
 | Способ | Что это | Python-аналог |
 |---|---|---|
-| `(import модуль)` | один из 13 встроенных модулей, вшитых в бинарник | `import` из стандартной библиотеки |
+| `(import модуль)` | один из 13 модулей stdlib; в обычной сборке вшиты в бинарник | `import` из стандартной библиотеки |
+| `(import модуль)` + `--package pkg.qlsl` | модуль из подключённого `.qlsl`-пакета; поиск идёт после встроенных | `pip install` + `import` |
+| `--path dir` / `QUALISP_PATH` | каталог с `*.qlsl` или отдельный архив; каталог сканируется лексикографически | `PYTHONPATH` |
+| `--lock qualisp.lock` / `QUALISP_LOCK` | фиксированный набор пакетов с проверкой SHA-256, имён и версий | `pip freeze` + lock-файл |
 | отдельный `script.qlsp` | файл, переданный раннеру `qualisp script.qlsp [args…]` | `python script.py` |
 | `(ffi-load path)` + `(ffi-defun …)` | разделяемая C-библиотека с объявленными сигнатурами | `ctypes.CDLL` + `argtypes`/`restype` |
+| `libqualisp` C ABI / Python `Session` | встроить исполняющий рантайм в C-хост или Python-процесс | CPython embedding / `ctypes` |
 | `(save-image …)` / `(load-image …)` | снимок пользовательского мира в QSRD | `pickle` + восстановление сессии |
-| LSP из исходников | `libqualisplsp` (C ABI) + `qualisp-lsp` (Rust) + расширение VSCodium; собирается локально, не входит в ассеты | `pyright`/`rust-analyzer`, установленный из исходников |
+| LSP из исходников | `libqualisplsp` (analysis-only C ABI) + `qualisp-lsp` (Rust) + расширение VSCodium | `pyright`/`rust-analyzer` из исходников |
 
-Пакетного менеджера `qvalent` **нет** — нет ни CLI, ни манифеста `qvalent.toml`, ни команды `qvalent get user/repo`. Нет и модуля `pkg` с `(pkg-install …)`: сетевых примитивов `http-get` в рантайме нет. Это не «урезанный» менеджер, а осознанный non-goal: среда целиком лежит в бинарнике, а расширение — либо FFI, либо свои файлы; LSP — инструмент разработки, а не пакет.
+Пакетного менеджера `qvalent` **нет** — нет ни CLI, ни манифеста `qvalent.toml`, ни команды `qvalent get user/repo`. Нет и модуля `pkg` с `(pkg-install …)`: сетевых примитивов `http-get` в рантайме нет. Это не «урезанный» менеджер, а осознанный non-goal: среда лежит в бинарнике или в `.qlsl`, а расширение — либо пакет, либо FFI, либо встраивание.
 
-> 🐍 Вместо `pip install` + `pyproject.toml` — `import` из stdlib и `ctypes` для внешнего кода. Всё остальное — вне среза релиза.
+> 🐍 Вместо `pip install` + `pyproject.toml` — `import` из stdlib, `.qlsl`-файл или `ctypes` для внешнего кода. Центрального индекса пакетов нет.
 
-## 16.2 Встроенные модули вместо пакетов
-
-Раздел сохраняет номер прежнего описания `qvalent`, но описывает реальное состояние: «менеджером» служит загрузчик встроенных модулей.
+## 16.2 Встроенные модули и пакеты `.qlsl`
 
 ```lisp
 (import ml)                       ; → ML — загрузить и открыть экспорты
@@ -27,25 +29,112 @@
 
 Правила загрузки (подробнее — гл. 15.11–15.14):
 
-- модули — Qualisp-код, вшитый через `@embedFile`; `core` и `error` — prelude, остальные ленивые;
+- модули — Qualisp-код; в обычной сборке вшиты через `@embedFile`, `core` и `error` — prelude, остальные ленивые;
+- `import` ищет модуль сначала среди встроенных, затем в подключённых `.qlsl`-пакетах;
+- пакеты подключаются явно (`--package`), каталогом (`--path`/`QUALISP_PATH`) или lock-файлом; каталог сканируется лексикографически, повторный тот же архив идемпотентен, другой пакет с тем же именем — `DuplicatePackage`;
 - импорт идемпотентен, приватные имена недостижимы, экспорты — алиасы;
 - конфликт публичных имён — `ImportConflict`;
 - неизвестный модуль — `UnknownModule`, неизвестный экспорт — `UnknownExport`;
 - `FFI` и `NS` не модули: `(import FFI)` даёт `error: UnknownModule`.
 
-Для собственного кода нет реестра и установщика: положите файл рядом и запустите `qualisp mylib.qlsp` либо загрузите его как скрипт. Как «пакет» можно сохранить снимок мира через `save-image` и загрузить его позже — но это персистенция, а не менеджер зависимостей.
+### Формат `.qlsl` и `qualisp-pack`
 
-> 🐍 `import ml` ≈ `import sklearn.metrics` из уже установленного окружения; собственного `pip` нет, а `sys.path` заменяет явный путь к файлу в CLI.
+`.qlsl` — детерминированный ZIP с хранимыми (stored) записями и манифестом `manifest.qlsp`; порядок файлов фиксирован, CRC32 проверяется при чтении. Упаковщик `qualisp-pack` (`src/qlsl.zig`, `src/pack_main.zig`) собирает пакет из каталога модулей; штатная сборка stdlib — `zig build pack`, результат `zig-out/share/qualisp/stdlib.qlsl`. Раннер принимает пакет флагом `--package` (можно повторять), каталог — `--path`, набор — `--lock`; Python — через `Session.add_package`, `add_search_path` и `load_lock`.
+
+```bash
+zig build pack
+qualisp --package zig-out/share/qualisp/stdlib.qlsl script.qlsp
+```
+
+Edge-профиль `zig build -Dembed-stdlib=false` оставляет в бинарнике только bootstrap `core`+`error`, а остальные 11 модулей ищет в `stdlib.qlsl` рядом с бинарником (`bin/../share/qualisp/stdlib.qlsl`) или в `--package`. `-Dstrip=true` уменьшает артефакты. В тестовой сборке модули всегда вшиты (`builtin.is_test`), чтобы тесты не зависели от файла рядом.
+
+### Поиск пакетов: `--path` и `QUALISP_PATH`
+
+`Session.addSearchPath(path)` принимает каталог или один `.qlsl`-архив. Каталог сканируется **лексикографически**; все найденные архивы подключаются по порядку. Повторное подключение того же архива — no-op, а другой архив с уже занятым именем пакета даёт `DuplicatePackage`. Отсутствующий путь — `MissingPackage`.
+
+```bash
+qualisp --path ./packages app.qlsp
+QUALISP_PATH=./packages:./vendor qualisp app.qlsp
+```
+
+`--path` можно повторять. Переменная `QUALISP_PATH` разделяется разделителем путей ОС (`:` на Linux, `;` на Windows). В Python то же делает `Session(search_path="packages")` или `ql.add_search_path("packages")`.
+
+### Lock-файл `qualisp.lock`
+
+Lock фиксирует точный набор пакетов: относительный путь, имя, версию и SHA-256 каждого архива. Формат — S-выражение:
+
+```lisp
+(lock :version 1
+      :packages ((:path "packages/my-lib.qlsl"
+                  :name "my-lib"
+                  :version "1.2.0"
+                  :sha256 "<64 lowercase hex>")))
+```
+
+`qualisp-pack lock <out.lock> <pkg.qlsl>...` создаёт детерминированный lock: записи сортируются, пути хранятся относительно lock-файла и всегда с `/`. Поля обязательны, порядок не важен; дубликаты путей, неизвестные поля и версия не `1` — `BadLock`.
+
+```bash
+qualisp-pack lock qualisp.lock packages/*.qlsl
+qualisp --lock qualisp.lock app.qlsp
+qualisp app.qlsp          # qualisp.lock рядом со скриптом подхватится сам
+qualisp --no-lock app.qlsp
+```
+
+Перед применением проверяются **все** записи: SHA-256, имя и версия. Несовпадение — `LockMismatch`, отсутствие файла или архива — `MissingPackage`; частичного применения нет. Когда lock активен, поисковые пути и соседний edge-`stdlib.qlsl` не используются — набор пакетов фиксирован. Явные `--package` при этом всё ещё разрешены, но конфликт имён диагностируется. `QUALISP_LOCK` задаёт lock через окружение; `--no-lock` отключает автоподхват. В Python — `Session(lock="qualisp.lock")` или `ql.load_lock("qualisp.lock")`; `lock` и `search_path` взаимоисключающие.
+
+> 🐍 `--path` ≈ `PYTHONPATH`, `qualisp.lock` ≈ `pip freeze`/lock-файл пакетного менеджера, только без сети и индекса: архив всё равно распространяется файлом.
+
+### 16.2.1 `libqualisp`: исполняющий C ABI
+
+`src/runtime_abi.zig` собирает `libqualisp.so`/`qualisp.dll` — отдельную библиотеку исполняющего рантайма, не путать с analysis-only `libqualisplsp` для LSP. Внутри — настоящая `Session` с JIT, собственным `std.Io.Threaded`, c-аллокатором и мьютексом вокруг вызовов.
+
+```c
+uint32_t ql_abi_version(void);
+Handle  *ql_session_new(void);
+void     ql_session_free(Handle *);
+int      ql_session_add_package(Handle *, const char *path);
+int      ql_session_add_search_path(Handle *, const char *path);
+int      ql_session_load_lock(Handle *, const char *path);
+char    *ql_session_eval(Handle *, const char *source, const char *file);
+void     ql_string_free(char *);
+const char *ql_session_last_error(Handle *);
+```
+
+`ql_session_eval` возвращает NUL-терминированную копию напечатанного значения последней формы; её освобождает `ql_string_free`. `ql_session_last_error` — заимствованная строка до следующего вызова. `add_package`, `add_search_path` и `load_lock` возвращают `0` при успехе и `-1` при ошибке, которую можно прочитать через `last_error`; ABI-версия остаётся `1`. Один handle нельзя закрывать во время вызова из другого потока; разные сессии можно вести на разных потоках. `ql_abi_version()` сейчас равен `1`; несовпадение с обёрткой — ошибка загрузки.
+
+### 16.2.2 Python-пакет `qualisp`
+
+Wheel `qualisp-0.19.20-py3-none-<platform>` содержит `libqualisp` и `stdlib.qlsl`; обёртка — тонкий ctypes-слой, вся работа (reader, checker, JIT, исполнение) остаётся в Zig. `ctypes` отпускает GIL на время вызова, поэтому разные `Session` могут работать параллельно; одна сессия сериализует вызовы мьютексом.
+
+```python
+from qualisp import Session
+
+with Session() as ql:              # при наличии wheel сам найдёт stdlib.qlsl
+    print(ql.eval("(+ 1 2)"))      # 3
+    ql.add_package("extra.qlsl")
+    print(ql.eval("(import dl) (mse-loss (tensor ((1.0))) (tensor ((0.0))))"))
+
+with Session(search_path="packages") as ql:   # все *.qlsl из каталога
+    ql.add_search_path("vendor")
+    ql.eval("(import my-lib)")
+
+with Session(lock="qualisp.lock") as ql:      # фиксированный набор + SHA-256
+    ql.load_lock("other.lock")
+```
+
+`Session(*packages, library=None, search_path=None, lock=None)`: `lock` и `search_path` взаимоисключающие (`ValueError`). Если не передано ни пакетов, ни lock/search path, подключается встроенный `stdlib.qlsl`. `Session()` ищет библиотеку через `QUALISP_LIB`, затем рядом с пакетом и в `zig-out/lib`; `stdlib.qlsl` — через `QUALISP_STDLIB` или рядом с пакетом. Ошибки приходят как `QualispError`. Есть также кодогенератор `Program`/`Sym`/`Type`/`SList`/`Call`: он только рендерит S-выражения (`defun`, `defvar`, `call`, литералы), а `Session.run(program)` отправляет текст в тот же конвейер; второго AST или Python-макросов нет.
+
+> 🐍 `import ml` ≈ `import sklearn.metrics` из уже установленного окружения; `.qlsl` ≈ локальный wheel без индекса, а `Session` ≈ встроенный CPython, только язык другой.
 
 ## 16.3 Собственные файлы и образы
 
-Как выглядит рабочий цикл без пакетного менеджера:
+Как выглядит рабочий цикл без центрального реестра (модули — встроенные, из `.qlsl` или свои файлы):
 
 ```bash
 $ qualisp script.qlsp --verbose --name lena input.txt
 ```
 
-Всё после имени скрипта — program args; `(command-line-args)` вернёт их список с argv[0] во главе (гл. 15.17). Флаги самого интерпретатора (`--trace`) разбираются **только до** имени скрипта.
+Всё после имени скрипта — program args; `(command-line-args)` вернёт их список с argv[0] во главе (гл. 15.17). Флаги самого интерпретатора (`--trace`, `--package`, `--path`, `--lock`, `--no-lock`) разбираются **только до** имени скрипта.
 
 Для сохранения состояния есть образы QSRD:
 
@@ -141,7 +230,7 @@ FFI — примитивы рантайма, а не модуль. Реализ�
 - `(f64, u64)` → `xmm0` + `rcx`;
 - `(u64, f64)` → `rcx` + `xmm1` (xmm0 при этом мусор).
 
-Генерируемый код: `push rbx; mov rbx,rdi` → аргументы → `call [target]` → возврат (`rax` для int/ptr, `xmm0` → `ret_i` для f32/f64 через `movq`/`movss`) → `pop rbx; ret`. Проверено под Wine на `kernel32` (`GetCurrentProcessId`, `lstrlenA`, `MultiByteToWideChar` с 6 аргументами), `msvcrt pow` и сгенерированных DLL со смешанными и стековыми аргументами. Тесты: **910 на Linux и 910 на Windows** (3 POSIX-FFI пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы).
+Генерируемый код: `push rbx; mov rbx,rdi` → аргументы → `call [target]` → возврат (`rax` для int/ptr, `xmm0` → `ret_i` для f32/f64 через `movq`/`movss`) → `pop rbx; ret`. Проверено под Wine на `kernel32` (`GetCurrentProcessId`, `lstrlenA`, `MultiByteToWideChar` с 6 аргументами), `msvcrt pow` и сгенерированных DLL со смешанными и стековыми аргументами. Тесты: **1095 на Linux и 1095 на Windows** (3 POSIX-FFI пропускаются, 1 Windows-FFI проверяет kernel32/msvcrt и стековые аргументы).
 
 | Ограничение | Комментарий |
 |---|---|
@@ -213,23 +302,29 @@ Q2 — секция `model`:
 
 ### Инструмент `tools/qsrd` (Rust)
 
-Читатель формата на Rust: `inspect`, `verify`, `cat`, `params`, `symbols`, `extract`. Конформанс-корпус (`tools/qsrd/corpus/basic.qlsp`, `weights.qlsp`) и `check.sh` сверяют вывод. Исходник читателя в снапшоте релиза отсутствует — описание CLI берётся из SPEC; готовые бинари есть только у `qprof`.
+Читатель формата на Rust (`tools/qsrd/main.rs`): `inspect`, `verify`, `cat`, `params`, `symbols`, `extract`. Конформанс-корпус (`tools/qsrd/corpus/basic.qlsp`, `weights.qlsp`) и `check.sh` сверяют вывод. Готовые бинари есть только у `qprof`; читатель собирается из исходников.
 
 > 🐍 `save-image` ≈ `pickle.dump`, `save-weights` ≈ `torch.save(model.state_dict())`, а `tools/qsrd verify` ≈ утилита проверки контрольных сумм архива: формат сам несёт crc32 и версию секций.
 
 ## 16.6 CLI, аргументы и трассировка
 
-Раздел сохраняет номер описания embedding C API; вместо C-хоста — CLI и внешние инструменты. Отдельный C ABI есть у LSP (`libqualisplsp`), но он analysis-only и собирается из исходников (§16.7).
+C-хост теперь существует (`libqualisp`, §16.2.1), а CLI остаётся основным способом запуска. Отдельный C ABI у LSP (`libqualisplsp`) — analysis-only и собирается из исходников (§16.7).
 
 ```text
-usage: qualisp [--trace <file.json>] [script.qlsp [args...]]
+usage: qualisp [--trace <file.json>] [--package <pkg.qlsl>] [--path <dir>]
+               [--lock <file>] [--no-lock] [script.qlsp [args...]]
 ```
 
 | Формы/флаги | Поведение |
 |---|---|
-| `--version` | `qualisp 0.19.16`, exit 0 |
+| `--version` | `qualisp 0.19.20`, exit 0 |
 | `--help`, `-h`, `-v` | usage + `error: BadArguments`, exit 1 |
 | `--trace` без файла | `BadArguments` |
+| `--package` без файла | `BadArguments`; флаг можно повторять, пакеты подключаются по порядку |
+| `--path` без значения | `BadArguments`; флаг можно повторять, каталог сканируется лексикографически |
+| `--lock` без файла | `BadArguments`; проверяет все записи до применения |
+| `--no-lock` | отключает автоподхват `qualisp.lock` и `QUALISP_LOCK` |
+| `qualisp.lock` рядом со скриптом | подхватывается автоматически, если нет `--lock`/`QUALISP_LOCK` и не задан `--no-lock` |
 | произвольный аргумент до скрипта | `BadArguments` |
 | нет скрипта | REPL: баннер `Qualisp`, промпт `> `, продолжение `... `; `quit` и `(exit)` — не команды |
 | файловый раннер | не печатает результат последней формы — только явный `print` |
@@ -253,7 +348,7 @@ FIB                           21891      1867136.0       152565.0  100.0%
 
 LSP — технологический инструмент, а не модуль и не примитив языка. В `(import LSP)` получается `error: UnknownModule`, а Lisp-фор `lsp-hover`, `lsp-diagnostics` и т. п. в бинаре нет. Сервер — отдельный процесс, говорящий по stdio JSON-RPC.
 
-**Один источник истины.** Синтаксис, типы и диагностика живут в Zig-компиляторе; Rust — только протокольная оболочка: нет второго ридера, чекера или AST. Инкрементального парсера нет, на `didChange` делается полный reparse. Анализатор **никогда не исполняет формы верхнего уровня** документа: `read → macroexpand → typecheck`; единственное выполнение кода — тела макросов. `emit`/`run` для анализируемого файла не вызываются. Библиотека называется `libqualisplsp` (имя `libqualisp` зарезервировано за будущей библиотекой рантайма).
+**Один источник истины.** Синтаксис, типы и диагностика живут в Zig-компиляторе; Rust — только протокольная оболочка: нет второго ридера, чекера или AST. Инкрементального парсера нет, на `didChange` делается полный reparse. Анализатор **никогда не исполняет формы верхнего уровня** документа: `read → macroexpand → typecheck`; единственное выполнение кода — тела макросов. `emit`/`run` для анализируемого файла не вызываются. Библиотека называется `libqualisplsp`; исполняющий `libqualisp` — отдельная библиотека (`src/runtime_abi.zig`, §16.2.1), и LSP её не использует.
 
 | Компонент | Что это |
 |---|---|
@@ -280,6 +375,6 @@ C ABI (`src/lsp_abi.zig`) экспортирует `ql_analyzer_new`/`free`, `ql
 
 Проверка: 16 Zig ABI-тестов и 12 Rust-интеграционных тестов над stdio (initialize/capabilities, пустые диагностики, old-syntax diagnostic, didChange, UTF-16-колонки, documentSymbol, definition+hover, completion, documentHighlight, semanticTokens, hover с формой и комментарием, definition из другого файла); мок-тест расширения — `node editors/vscode/test/smoke.js`.
 
-**Честно про поставку.** В ассетах 0.19.16 ровно 6 файлов: два `qualisp`, три `qprof` и `SHA256SUMS.txt`. Готового `qualisp-lsp`, `libqualisplsp.so/.dll` и `.vsix` там **нет**. LSP поставляется в исходниках: чтобы получить сервер и расширение, соберите их локально — `bash tools/lsp/build.sh` (результат — `zig-out/lsp/`), затем `node editors/vscode/test/smoke.js` или `python3 editors/vscode/package-vsix.py` (самодостаточный `zig-out/qualisp.vsix`, ставится `codium --install-extension zig-out/qualisp.vsix --force`, без `vsce` и npm). Пути переопределяются настройками `qualisp.lsp.serverPath` / `qualisp.lsp.libraryPath`. Демо — `examples/lsp-demo.qlsp` (гл. 17.8).
+**Честно про поставку.** В ассетах 0.19.20 восемь файлов: два `qualisp`, три `qprof`, два Python-wheel (`qualisp-0.19.20-py3-none-linux_x86_64.whl`, `...-win_amd64.whl`) и `SHA256SUMS.txt`. `libqualisp` лежит внутри wheel, отдельного ассета нет. Готового `qualisp-lsp`, standalone `libqualisplsp.so/.dll` и `.vsix` там **нет**. LSP поставляется в исходниках: чтобы получить сервер и расширение, соберите их локально — `bash tools/lsp/build.sh` (результат — `zig-out/lsp/`), затем `node editors/vscode/test/smoke.js` или `python3 editors/vscode/package-vsix.py` (самодостаточный `zig-out/qualisp.vsix`, ставится `codium --install-extension zig-out/qualisp.vsix --force`, без `vsce` и npm). Пути переопределяются настройками `qualisp.lsp.serverPath` / `qualisp.lsp.libraryPath`. Демо — `examples/lsp-demo.qlsp` (гл. 17.8).
 
 > 🐍 Как `rust-analyzer`: бинарник всегда можно собрать из исходников, но в готовый релиз языка он не обязательно входит. Расширение при этом тонкое, как клиент LSP на чистом JS, а не сам компилятор на TypeScript.

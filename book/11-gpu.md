@@ -51,7 +51,7 @@ pub export fn ql_hlo_add(frame: *HloFrame, out: u32, a: u32, b: u32)
 
 ```text
 $ qualisp --version
-qualisp 0.19.16
+qualisp 0.19.20
 ```
 
 Тип значения узнаётся через `type-of` — тензор даёт `TENSOR` (гл. 4). Ни
@@ -75,7 +75,7 @@ qualisp 0.19.16
   после параллельного прохода;
 - `defuse` — скалярный f32-цикл x86-64 без промежуточных тензоров, AVX2 по
   8 f32 + scalar-tail;
-- Ядра reduce и elementwise работают с `f16`/`f32`/`f64`/`u8`, для `u8` сохранены
+- Ядра reduce и elementwise работают с `f16`/`f32`/`f64`/`u8`/`i64`, для `u8` и `i64` сохранены
   точные операции с округлением/clamp.
 
 Параллельные ветки идут через `src/kernel_pool.zig` — пул вычислительных ядер,
@@ -147,17 +147,22 @@ segfault.
 (unguarded fixnum-арифметика по типам от чекера) измерена и откатана:
 arith-loop 18.15 → 18.26 нс, calls 33.51 → 32.68 нс, fib 42 → 43 мс;
 JIT компилирует функцию один раз и мономорфным не является. Реальный выигрыш
-дали unboxed fixnum-локальные (M3a: 10.2 → 3.2 нс, 14.9 → 4.5 нс; гл. 5, 20).
+дали unboxed fixnum/flonum-локальные (M3a/M3b: fixnum-цикл 10.2 → 3.2 нс,
+flonum-цикл 4.82 нс), scalar replacement глобалов в цикле (M3c: 17.6 → 10.4 нс)
+и инлайн-вызов глобала с ленивым traceback (M4: fib 42.2 → 25.8 мс, локальный
+вызов 26.6 → 13.9 нс; гл. 5, 20).
 
 ## 11.8 Известные ограничения
 
 - **GPU-бэкенда нет.** Ни CUDA, ни ROCm, ни Vulkan/Metal в проекте не
   встречаются; `device-info` и `Device` тоже отсутствуют.
 - **Параллелятся только ядра с непересекающимися выходами:** elementwise/map,
-  matmul, reshape/transpose, sum/mean и NS router/compaction. `max`, `softmax`,
-  `argmax`, `reduceToShape` остаются последовательными (global-редукция или
-  read-modify-write выхода); воркеры не имеют `Runtime`, вложенный параллелизм
-  на них отключён.
+  batched matmul, reshape/transpose, sum/mean (полные и осевые), строчный
+  broadcast/reduce, `softmax`/`log-softmax` по строкам последней оси, свёртки и
+  пулинг (forward по батчу, backward `dx`/`dw` отдельными проходами) и NS
+  router/compaction. `max` и `argmax` остаются последовательными
+  (global-редукция или read-modify-write выхода); воркеры не имеют `Runtime`,
+  вложенный параллелизм на них отключён.
 - Поддерживаются только `x86_64-linux-gnu` и `x86_64-windows-gnu`/`-msvc`
   (Windows — с оговорками); других архитектур нет, эмиттер хардкодит x86-64.
 - SIMD — AVX2; NEON и «скалярный путь для другой архитектуры» в реализации
